@@ -678,6 +678,18 @@ class CrudeOilMainEngine:
         if self.state_store.has_unresolved_intents(self.state):
             raise RuntimeError("First entry blocked by an unresolved saved order intent.")
 
+        # Populate the persisted strategy parameters BEFORE calculating
+        # the first cycle. OrderManager.calculate_first_cycle() reads
+        # direction/grid/SL distance from this state; calculating first
+        # against a fresh state would otherwise fail on blank defaults.
+        strategy["direction"] = str(getattr(config, "DIRECTION", "")).upper()
+        strategy["grid_points"] = int(config.GRID_POINTS)
+        strategy["stop_loss_points"] = int(config.STOP_LOSS_POINTS)
+        strategy["maximum_entries"] = int(config.MAX_ENTRIES)
+        strategy["quantity_per_entry"] = int(config.QUANTITY_PER_ENTRY)
+        strategy["lot_size"] = int(config.LOT_SIZE)
+        strategy["lots_per_entry"] = int(config.LOTS_PER_ENTRY)
+
         ltp = self.read_ltp()
         plan = self.order_manager.calculate_first_cycle(ltp)
 
@@ -691,13 +703,6 @@ class CrudeOilMainEngine:
         strategy["common_stop_loss"] = plan["stop_loss"]
         strategy["entry_count"] = 0
         strategy["next_entry_sequence"] = 1
-        strategy["direction"] = str(getattr(config, "DIRECTION", "")).upper()
-        strategy["grid_points"] = int(config.GRID_POINTS)
-        strategy["stop_loss_points"] = int(config.STOP_LOSS_POINTS)
-        strategy["maximum_entries"] = int(config.MAX_ENTRIES)
-        strategy["quantity_per_entry"] = int(config.QUANTITY_PER_ENTRY)
-        strategy["lot_size"] = int(config.LOT_SIZE)
-        strategy["lots_per_entry"] = int(config.LOTS_PER_ENTRY)
 
         prices = self.state["prices"]
         prices["initial_entry"] = plan["entry_price"]
