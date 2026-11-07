@@ -1,0 +1,575 @@
+
+# ==========================================================
+# DHAN CRUDEOILM - ORDER MONITOR
+# VERSION 4.0 - STATE STORE V5 COMPATIBLE
+#
+# BROKER ORDER RECONCILIATION
+# DIRECT DHAN LIST RESPONSE SUPPORT
+# CORRELATION ID VALIDATION
+# CONTRACT VALIDATION
+# DUPLICATE ORDER DETECTION
+# FILL TRACKER INTEGRATION
+# CANCELLATION LOCK REGISTRATION
+# MISSING ORDER DETECTION
+# UNKNOWN STATUS PROTECTION
+#
+# NO ORDER PLACEMENT
+# NO ORDER MODIFICATION
+# NO ORDER CANCELLATION
+# NO AUTOMATIC RETRY
+# ==========================================================
+
+from datetime import datetime
+
+
+class OrderMonitor:
+
+    ACTIVE_STATUSES = {
+        "PENDING",
+        "TRANSIT",
+        "PART_TRADED",
+        "OPEN",
+    }
+
+    TERMINAL_STATUSES = {
+        "TRADED",
+        "CANCELLED",
+        "REJECTED",
+        "EXPIRED",
+    }
+
+    def __init__(
+        self,
+        state_store,
+        state,
+        client,
+        fill_tracker,
+    ):
+
+        self.state_store = state_store
+        self.state = state
+        self.client = client
+        self.fill_tracker = fill_tracker
+
+        if not isinstance(self.state, dict):
+            raise RuntimeError(
+                "OrderMonitor requires a valid state dictionary."
+            )
+
+    # ======================================================
+    # HELPERS
+    # ======================================================
+
+    def _now(self):
+
+        return datetime.now().isoformat()
+
+    def _normalise_status(self, order):
+
+        return str(
+            order.get("orderStatus")
+            or order.get("status")
+            or ""
+        ).upper().strip()
+
+    def _correlation_id(self, order):
+
+        return (
+            order.get("correlationId")
+            or order.get("correlation_id")
+        )
+
+    def _order_id(self, order):
+
+        return (
+            order.get("orderId")
+            or order.get("order_id")
+        )
+
+    # ======================================================
+    # RESPONSE NORMALISATION
+    # ======================================================
+
+    def _extract_orders(self, response):
+
+        if isinstance(response, str):
+
+            import json
+
+            try:
+                response = json.loads(response)
+            except Exception:
+                raise RuntimeError(
+                    "Broker orders response is invalid JSON."
+                )
+
+        if response is None:
+            raise RuntimeError(
+                "Broker returned an empty orders response."
+            )
+
+        if isinstance(response, list):
+            orders = response
+
+        elif isinstance(response, dict):
+
+            status = response.get("status")
+
+            if status is not None:
+
+                status_text = str(status).lower()
+
+                if status_text not in (
+                    "success",
+                    "true",
+                    "200",
+                    "ok",
+                ):
+                    raise RuntimeError(
+                        "Broker orders API reported failure."
+                    )
+
+            data = response.get("data")
+
+            if data is None:
+                data = response.get("orders")
+
+            if isinstance(data, list):
+                orders = data
+
+            elif isinstance(data, dict):
+
+                nested = data.get("orders")
+
+                if isinstance(nested, list):
+                    orders = nested
+                else:
+                    raise RuntimeError(
+                        "Broker orders data structure is unsupported."
+                    )
+
+            else:
+                raise RuntimeError(
+                    "Broker orders response does not contain a list."
+                )
+
+        else:
+
+            raise RuntimeError(
+                "Unsupported broker orders response type."
+            )
+
+        for order in orders:
+
+            if not isinstance(order, dict):
+                raise RuntimeError(
+                    "Broker returned an invalid order record."
+                )
+
+        return orders
+
+    # ======================================================
+    # CONTRACT FILTER
+    # ======================================================
+
+    def _is_active_contract_order(self, order):
+
+        active = self.state.get(
+            "active_contract",
+            {},
+        )
+
+        security_id = (
+            order.get("securityId")
+            or order.get("security_id")
+        )
+
+        exchange_segment = (
+            order.get("exchangeSegment")
+            or order.get("exchange_segment")
+        )
+
+        return (
+            str(security_id) == str(active.get("security_id"))
+            and
+            str(exchange_segment) == str(active.get("exchange_segment"))
+        )
+
+    # ======================================================
+    # REGISTERED ORDER LOOKUP
+    # ======================================================
+
+    def _registered_orders(self):
+
+        orders = self.state.get("orders", {})
+
+        if not isinstance(orders, dict):
+            raise RuntimeError(
+                "Saved orders section is invalid."
+            )
+
+        result = []
+
+        for group_name in (
+            "pending_entry_orders",
+            "stop_loss_orders",
+        ):
+
+            group = orders.get(group_name, {})
+
+            if not isinstance(group, dict):
+                raise RuntimeError(
+                    "Invalid saved order group: " + group_name
+                )
+
+            for key, record in group.items():
+
+                if not isinstance(record, dict):
+                    raise RuntimeError(
+                        "Invalid saved order record: " + str(key)
+                    )
+
+                correlation_id = (
+                    record.get("correlationId")
+                    or record.get("correlation_id")
+                    or record.get("payload", {}).get("correlationId")
+                )
+
+                if not correlation_id:
+                    raise RuntimeError(
+                        "Registered order has no correlation ID: "
+                        + str(key)
+                    )
+
+                result.append({
+                    "group": group_name,
+                    "key": key,
+                    "record": record,
+                    "correlation_id": str(correlation_id),
+                })
+
+        return result
+
+    # ======================================================
+    # BROKER ORDER INDEX
+    # ======================================================
+
+    def _index_broker_orders(self, broker_orders):
+
+        indexed = {}
+
+        for order in broker_orders:
+
+            if not self._is_active_contract_order(order):
+                continue
+
+            correlation_id = self._correlation_id(order)
+
+            if not correlation_id:
+                continue
+
+            correlation_id = str(correlation_id)
+
+            if correlation_id in indexed:
+                raise RuntimeError(
+                    "Duplicate broker correlation ID detected: "
+                    + correlation_id
+                )
+
+            indexed[correlation_id] = order
+
+        return indexed
+
+    # ======================================================
+    # ORDER VALIDATION
+    # ======================================================
+
+    def _validate_order_identity(
+        self,
+        registered,
+        broker_order,
+    ):
+
+        saved = registered["record"]
+
+        broker_correlation = self._correlation_id(
+            broker_order
+        )
+
+        if str(broker_correlation) != registered["correlation_id"]:
+            raise RuntimeError(
+                "Broker correlation ID mismatch."
+            )
+
+        saved_order_id = saved.get("order_id")
+        broker_order_id = self._order_id(broker_order)
+
+        if saved_order_id and broker_order_id:
+
+            if str(saved_order_id) != str(broker_order_id):
+                raise RuntimeError(
+                    "Broker order ID does not match saved order."
+                )
+
+        if not self._is_active_contract_order(broker_order):
+            raise RuntimeError(
+                "Broker order contract mismatch."
+            )
+
+        return True
+
+    # ======================================================
+    # CANCELLATION REGISTRATION
+    # ======================================================
+
+    def _register_cancellation(
+        self,
+        registered,
+        broker_order,
+    ):
+
+        group_name = registered["group"]
+
+        role = (
+            "ENTRY_LIMIT"
+            if group_name == "pending_entry_orders"
+            else "STOP_LOSS"
+        )
+
+        record = {
+            "correlation_id": registered["correlation_id"],
+            "order_id": str(
+                self._order_id(broker_order) or ""
+            ),
+            "security_id": str(
+                broker_order.get("securityId", "")
+            ),
+            "exchange_segment": str(
+                broker_order.get("exchangeSegment", "")
+            ),
+            "broker_status": "CANCELLED",
+            "source": "EXTERNAL_OR_BROKER_UNCONFIRMED",
+            "detected_at": self._now(),
+        }
+
+        # Lock is persisted before monitor continues.
+        self.state_store.register_cancelled_order(
+            state=self.state,
+            record=record,
+            role=role,
+        )
+
+        registered["record"]["status"] = "CANCELLED"
+        registered["record"]["broker_status"] = "CANCELLED"
+        registered["record"]["cancelled_at"] = self._now()
+
+        self.state_store.save(self.state)
+
+    # ======================================================
+    # STATUS VALIDATION
+    # ======================================================
+
+    def _validate_status(self, status, correlation_id):
+
+        if status not in (
+            self.ACTIVE_STATUSES
+            | self.TERMINAL_STATUSES
+        ):
+
+            raise RuntimeError(
+                "Unknown broker order status for "
+                + str(correlation_id)
+                + ": "
+                + str(status)
+            )
+
+    # ======================================================
+    # RECONCILE ONE ORDER
+    # ======================================================
+
+    def _reconcile_one(
+        self,
+        registered,
+        broker_order,
+    ):
+
+        self._validate_order_identity(
+            registered,
+            broker_order,
+        )
+
+        correlation_id = registered["correlation_id"]
+        record = registered["record"]
+
+        status = self._normalise_status(
+            broker_order
+        )
+
+        self._validate_status(
+            status,
+            correlation_id,
+        )
+
+        previous_status = str(
+            record.get("status", "")
+        ).upper()
+
+        # Always observe fill quantities before processing
+        # cancellation or terminal status.
+        fill_result = self.fill_tracker.observe_order(
+            broker_order
+        )
+
+        if status == "CANCELLED":
+
+            # Do not label the cancellation definitely manual.
+            # Broker response does not prove who cancelled it.
+            self._register_cancellation(
+                registered,
+                broker_order,
+            )
+
+            return {
+                "correlation_id": correlation_id,
+                "status": status,
+                "action": "CANCELLATION_LOCKED",
+                "fill": fill_result,
+            }
+
+        if status in ("REJECTED", "EXPIRED"):
+
+            record["status"] = status
+            record["broker_status"] = status
+            record["terminal_detected_at"] = self._now()
+
+            self.state_store.save(self.state)
+
+            raise RuntimeError(
+                "Registered algo order is "
+                + status
+                + ": "
+                + correlation_id
+            )
+
+        if previous_status == "CANCELLED":
+
+            raise RuntimeError(
+                "Previously cancelled order changed status unexpectedly: "
+                + correlation_id
+            )
+
+        return {
+            "correlation_id": correlation_id,
+            "status": status,
+            "action": "RECONCILED",
+            "fill": fill_result,
+        }
+
+    # ======================================================
+    # MISSING ORDER CHECK
+    # ======================================================
+
+    def _check_missing_orders(
+        self,
+        registered_orders,
+        broker_index,
+    ):
+
+        missing = []
+
+        for registered in registered_orders:
+
+            record = registered["record"]
+            correlation_id = registered["correlation_id"]
+
+            saved_status = str(
+                record.get("status", "")
+            ).upper()
+
+            if saved_status in self.TERMINAL_STATUSES:
+                continue
+
+            if correlation_id not in broker_index:
+
+                missing.append(correlation_id)
+
+        if missing:
+
+            raise RuntimeError(
+                "Registered active orders missing from broker response: "
+                + ", ".join(missing)
+            )
+
+        return True
+
+    # ======================================================
+    # POLL ONCE
+    # ======================================================
+
+    def poll_once(self):
+
+        response = self.client.get_orders()
+
+        broker_orders = self._extract_orders(
+            response
+        )
+
+        registered_orders = self._registered_orders()
+
+        broker_index = self._index_broker_orders(
+            broker_orders
+        )
+
+        results = []
+
+        for registered in registered_orders:
+
+            correlation_id = registered["correlation_id"]
+
+            saved_status = str(
+                registered["record"].get("status", "")
+            ).upper()
+
+            if saved_status in self.TERMINAL_STATUSES:
+                continue
+
+            broker_order = broker_index.get(
+                correlation_id
+            )
+
+            if broker_order is None:
+                continue
+
+            result = self._reconcile_one(
+                registered,
+                broker_order,
+            )
+
+            results.append(result)
+
+        self._check_missing_orders(
+            registered_orders,
+            broker_index,
+        )
+
+        # Only mark order reconciliation successful after
+        # all registered active orders have been checked.
+        reconciliation = self.state.setdefault(
+            "reconciliation",
+            {},
+        )
+
+        reconciliation["orders_checked"] = True
+        reconciliation["last_order_sync"] = self._now()
+
+        self.state_store.save(self.state)
+
+        return {
+            "success": True,
+            "broker_order_count": len(broker_orders),
+            "registered_order_count": len(registered_orders),
+            "reconciled_order_count": len(results),
+            "results": results,
+            "orders_checked": True,
+            "timestamp": self._now(),
+        }

@@ -1,0 +1,52 @@
+{
+  "active_contract": {
+    "exchange_segment": "MCX_COMM",
+    "expiry": "2026-12-18",
+    "security_id": "576265",
+    "symbol": "CRUDEOILM-18Dec2026-FUT"
+  },
+  "checksum": "3231ae7530174f22f8fae15a080f4019c07e23d4722aa3200518fd39ddfbf199",
+  "manual_cancel_locks": {
+    "ENTRY_LIMIT": false,
+    "STOP_LOSS": false,
+    "records": []
+  },
+  "orders": {
+    "manual_cancelled_orders": {},
+    "order_fill_totals": {},
+    "pending_entry_orders": {},
+    "stop_loss_orders": {}
+  },
+  "positions": {
+    "common_stop_loss_quantity": 0,
+    "intraday_quantity": 0,
+    "margin_quantity": 0,
+    "registered_positions": {},
+    "total_quantity": 0
+  },
+  "prices": {
+    "common_stop_loss": null,
+    "initial_entry": null,
+    "last_entry": null,
+    "next_grid": null
+  },
+  "reconciliation": {
+    "orders_checked": false,
+    "positions_checked": false
+  },
+  "state_version": 5,
+  "strategy": {
+    "cycle_active": false,
+    "cycle_closed": true,
+    "direction": "SELL",
+    "execution_id": null,
+    "grid_points": 100,
+    "lot_size": 10,
+    "lots_per_entry": 1,
+    "maximum_entries": 10,
+    "maximum_overnight_lots": 3,
+    "quantity_per_entry": 10,
+    "stop_loss_points": 100
+  },
+  "updated_at": "2026-11-07T14:16:47.247423"
+}

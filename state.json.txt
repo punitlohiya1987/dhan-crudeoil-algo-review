@@ -1,0 +1,52 @@
+
+{
+  "state_version": 5,
+  "active_contract": {
+    "symbol": "CRUDEOILM-18Dec2026-FUT",
+    "security_id": "576265",
+    "expiry": "2026-12-18",
+    "exchange_segment": "MCX_COMM"
+  },
+  "strategy": {
+    "direction": "SELL",
+    "cycle_active": false,
+    "cycle_closed": true,
+    "execution_id": null,
+    "lots_per_entry": 1,
+    "lot_size": 10,
+    "quantity_per_entry": 10,
+    "grid_points": 100,
+    "stop_loss_points": 100,
+    "maximum_entries": 10,
+    "maximum_overnight_lots": 3
+  },
+  "prices": {
+    "initial_entry": null,
+    "last_entry": null,
+    "next_grid": null,
+    "common_stop_loss": null
+  },
+  "positions": {
+    "total_quantity": 0,
+    "margin_quantity": 0,
+    "intraday_quantity": 0,
+    "common_stop_loss_quantity": 0,
+    "registered_positions": {}
+  },
+  "orders": {
+    "pending_entry_orders": {},
+    "stop_loss_orders": {},
+    "order_fill_totals": {},
+    "manual_cancelled_orders": {}
+  },
+  "manual_cancel_locks": {
+    "ENTRY_LIMIT": false,
+    "STOP_LOSS": false,
+    "records": []
+  },
+  "reconciliation": {
+    "positions_checked": false,
+    "orders_checked": false
+  },
+  "checksum": "d72ba969fef47e82d08cb6a3a17f17bdd0113cf93aa5a931779d8ae4a1e32130"
+}

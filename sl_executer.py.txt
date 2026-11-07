@@ -1,0 +1,762 @@
+
+# ==========================================================
+# DHAN CRUDEOILM - SL EXECUTOR
+# VERSION 4.0 - STRICT REGISTERED SL MODIFICATION
+#
+# EXISTING REGISTERED SL ONLY
+# NO CANCEL AND REPLACE
+# NO AUTOMATIC RETRY
+# MANUAL CANCELLATION LOCK AWARE
+# TIGHTENING ONLY
+# ORIGINAL QUANTITY HANDLING
+# PARTIAL FILL AWARE
+# MODIFICATION INTENT PERSISTENCE
+# POST-MODIFICATION VERIFICATION
+#
+# LIVE MODIFICATION RELEASE: DISABLED
+# ==========================================================
+
+from datetime import datetime
+
+import config
+
+
+LIVE_SL_MODIFICATION_RELEASED = False
+
+
+class StopLossExecutor:
+
+    ACTIVE_STATUSES = {
+        "PENDING",
+        "TRANSIT",
+        "PART_TRADED",
+        "OPEN",
+    }
+
+    def __init__(
+        self,
+        client,
+        state_store,
+        state,
+    ):
+
+        self.client = client
+        self.state_store = state_store
+        self.state = state
+
+        if not isinstance(self.state, dict):
+            raise RuntimeError(
+                "SL Executor requires valid state."
+            )
+
+    # ======================================================
+    # HELPERS
+    # ======================================================
+
+    def _now(self):
+
+        return datetime.now().isoformat()
+
+    def _integer(self, value, name):
+
+        if isinstance(value, bool):
+            raise RuntimeError(
+                "Invalid integer: " + name
+            )
+
+        try:
+            result = int(value)
+        except (TypeError, ValueError):
+            raise RuntimeError(
+                "Invalid integer: " + name
+            )
+
+        if result < 0 or result != value:
+            raise RuntimeError(
+                "Invalid integer: " + name
+            )
+
+        return result
+
+    def _price(self, value, name):
+
+        try:
+            result = float(value)
+        except (TypeError, ValueError):
+            raise RuntimeError(
+                "Invalid price: " + name
+            )
+
+        if result <= 0:
+            raise RuntimeError(
+                "Invalid price: " + name
+            )
+
+        return result
+
+    def _save(self):
+
+        self.state_store.save(self.state)
+
+    # ======================================================
+    # LOCK CHECK
+    # ======================================================
+
+    def _check_lock(self):
+
+        if self.state_store.is_locked(
+            self.state,
+            "STOP_LOSS",
+        ):
+            raise RuntimeError(
+                "SL modification blocked by cancellation lock."
+            )
+
+    # ======================================================
+    # REGISTERED SL LOOKUP
+    # ======================================================
+
+    def _find_registered_sl(
+        self,
+        order_id,
+        correlation_id,
+    ):
+
+        group = self.state.get(
+            "orders",
+            {},
+        ).get(
+            "stop_loss_orders",
+            {},
+        )
+
+        if not isinstance(group, dict):
+            raise RuntimeError(
+                "Registered SL order group is invalid."
+            )
+
+        matches = []
+
+        for key, record in group.items():
+
+            if not isinstance(record, dict):
+                continue
+
+            saved_id = str(
+                record.get("order_id") or ""
+            )
+
+            saved_correlation = str(
+                record.get("correlationId")
+                or record.get("correlation_id")
+                or record.get("payload", {}).get("correlationId")
+                or ""
+            )
+
+            id_match = (
+                order_id is not None
+                and saved_id
+                and str(order_id) == saved_id
+            )
+
+            correlation_match = (
+                correlation_id is not None
+                and saved_correlation
+                and str(correlation_id) == saved_correlation
+            )
+
+            if id_match or correlation_match:
+
+                matches.append({
+                    "key": key,
+                    "record": record,
+                })
+
+        if len(matches) != 1:
+            raise RuntimeError(
+                "SL must match exactly one registered order."
+            )
+
+        return matches[0]
+
+    # ======================================================
+    # VALIDATE EXISTING BROKER SL
+    # ======================================================
+
+    def _validate_registered_sl(
+        self,
+        registered,
+        broker_order,
+    ):
+
+        if not isinstance(broker_order, dict):
+            raise RuntimeError(
+                "Broker SL order must be a dictionary."
+            )
+
+        record = registered["record"]
+
+        broker_id = str(
+            broker_order.get("orderId")
+            or broker_order.get("order_id")
+            or ""
+        )
+
+        saved_id = str(
+            record.get("order_id") or ""
+        )
+
+        if not broker_id or broker_id != saved_id:
+            raise RuntimeError(
+                "SL broker order ID mismatch."
+            )
+
+        broker_correlation = str(
+            broker_order.get("correlationId")
+            or broker_order.get("correlation_id")
+            or ""
+        )
+
+        saved_correlation = str(
+            record.get("correlationId")
+            or record.get("correlation_id")
+            or record.get("payload", {}).get("correlationId")
+            or ""
+        )
+
+        if (
+            not broker_correlation
+            or broker_correlation != saved_correlation
+        ):
+            raise RuntimeError(
+                "SL correlation ID mismatch."
+            )
+
+        active = self.state.get(
+            "active_contract",
+            {},
+        )
+
+        if str(
+            broker_order.get("securityId")
+        ) != str(active.get("security_id")):
+            raise RuntimeError(
+                "SL security ID mismatch."
+            )
+
+        if str(
+            broker_order.get("exchangeSegment")
+        ) != str(active.get("exchange_segment")):
+            raise RuntimeError(
+                "SL exchange segment mismatch."
+            )
+
+        order_type = str(
+            broker_order.get("orderType", "")
+        ).upper()
+
+        if order_type not in (
+            "STOP_LOSS",
+            "STOP_LOSS_MARKET",
+        ):
+            raise RuntimeError(
+                "Only registered stop orders can be modified."
+            )
+
+        status = str(
+            broker_order.get("orderStatus")
+            or broker_order.get("status")
+            or ""
+        ).upper()
+
+        if status not in self.ACTIVE_STATUSES:
+            raise RuntimeError(
+                "Broker SL is not active."
+            )
+
+        saved_payload = record.get(
+            "payload",
+            {},
+        )
+
+        saved_product = str(
+            record.get("product_type")
+            or saved_payload.get("productType")
+            or ""
+        ).upper()
+
+        broker_product = str(
+            broker_order.get("productType", "")
+        ).upper()
+
+        if saved_product != broker_product:
+            raise RuntimeError(
+                "SL product type mismatch."
+            )
+
+        direction = str(
+            self.state["strategy"].get("direction", "")
+        ).upper()
+
+        expected_transaction = (
+            "BUY"
+            if direction == "SELL"
+            else "SELL"
+        )
+
+        broker_transaction = str(
+            broker_order.get("transactionType", "")
+        ).upper()
+
+        if broker_transaction != expected_transaction:
+            raise RuntimeError(
+                "SL transaction direction mismatch."
+            )
+
+        original_quantity = self._integer(
+            broker_order.get("quantity"),
+            "original SL quantity",
+        )
+
+        filled_value = (
+            broker_order.get("filledQty")
+            if broker_order.get("filledQty") is not None
+            else broker_order.get("filledQuantity", 0)
+        )
+
+        filled_quantity = self._integer(
+            filled_value,
+            "SL filled quantity",
+        )
+
+        if filled_quantity > original_quantity:
+            raise RuntimeError(
+                "SL filled quantity exceeds original quantity."
+            )
+
+        trigger = self._price(
+            broker_order.get("triggerPrice"),
+            "current SL trigger",
+        )
+
+        return {
+            "order_id": broker_id,
+            "correlation_id": broker_correlation,
+            "product_type": broker_product,
+            "original_quantity": original_quantity,
+            "filled_quantity": filled_quantity,
+            "remaining_quantity": (
+                original_quantity - filled_quantity
+            ),
+            "current_trigger": trigger,
+            "status": status,
+            "order_type": order_type,
+            "transaction_type": broker_transaction,
+        }
+
+    # ======================================================
+    # TIGHTENING VALIDATION
+    # ======================================================
+
+    def _validate_tightening(
+        self,
+        direction,
+        current_trigger,
+        desired_trigger,
+    ):
+
+        direction = str(direction).upper()
+
+        if direction == "SELL":
+
+            # SELL protection tightens only downward.
+            if desired_trigger >= current_trigger:
+                raise RuntimeError(
+                    "SELL SL may only move downward."
+                )
+
+        elif direction == "BUY":
+
+            # BUY protection tightens only upward.
+            if desired_trigger <= current_trigger:
+                raise RuntimeError(
+                    "BUY SL may only move upward."
+                )
+
+        else:
+
+            raise RuntimeError(
+                "Invalid strategy direction."
+            )
+
+        return True
+
+    # ======================================================
+    # BUILD MODIFICATION REQUEST
+    # ======================================================
+
+    def build_request(
+        self,
+        broker_order,
+        desired,
+    ):
+
+        if not isinstance(desired, dict):
+            raise RuntimeError(
+                "Desired SL plan must be a dictionary."
+            )
+
+        if desired.get("required") is not True:
+            raise RuntimeError(
+                "SL modification is not marked as required."
+            )
+
+        if desired.get("confirmed") is True:
+            raise RuntimeError(
+                "SL is already confirmed; modification not required."
+            )
+
+        current_quantity = self._integer(
+            broker_order.get("quantity"),
+            "broker SL original quantity",
+        )
+
+        filled_value = (
+            broker_order.get("filledQty")
+            if broker_order.get("filledQty") is not None
+            else broker_order.get("filledQuantity", 0)
+        )
+
+        filled_quantity = self._integer(
+            filled_value,
+            "broker SL filled quantity",
+        )
+
+        desired_remaining = self._integer(
+            desired.get("quantity"),
+            "desired remaining SL quantity",
+        )
+
+        if filled_quantity > current_quantity:
+            raise RuntimeError(
+                "Broker SL filled quantity is invalid."
+            )
+
+        # Dhan modification quantity is the total order
+        # quantity, not merely the remaining quantity.
+        target_original_quantity = (
+            desired_remaining + filled_quantity
+        )
+
+        if target_original_quantity <= filled_quantity:
+            raise RuntimeError(
+                "Modified SL quantity must exceed already-filled quantity."
+            )
+
+        desired_trigger = self._price(
+            desired.get("trigger_price"),
+            "desired SL trigger",
+        )
+
+        current_trigger = self._price(
+            broker_order.get("triggerPrice"),
+            "current SL trigger",
+        )
+
+        direction = str(
+            self.state["strategy"].get("direction", "")
+        ).upper()
+
+        self._validate_tightening(
+            direction,
+            current_trigger,
+            desired_trigger,
+        )
+
+        return {
+            "orderType": "STOP_LOSS_MARKET",
+            "quantity": target_original_quantity,
+            "price": 0,
+            "triggerPrice": desired_trigger,
+            "validity": "DAY",
+        }
+
+    # ======================================================
+    # SAVE MODIFICATION INTENT
+    # ======================================================
+
+    def _save_intent(
+        self,
+        broker_order,
+        request,
+    ):
+
+        reconciliation = self.state.setdefault(
+            "reconciliation",
+            {},
+        )
+
+        existing = reconciliation.get(
+            "sl_modification_intent"
+        )
+
+        if isinstance(existing, dict):
+
+            status = str(
+                existing.get("status", "")
+            ).upper()
+
+            if status in (
+                "MODIFICATION_PENDING",
+                "MODIFICATION_UNCERTAIN",
+                "VERIFICATION_REQUIRED",
+            ):
+                raise RuntimeError(
+                    "An unresolved SL modification intent already exists."
+                )
+
+        intent = {
+            "status": "MODIFICATION_PENDING",
+            "order_id": str(
+                broker_order.get("orderId")
+            ),
+            "correlation_id": str(
+                broker_order.get("correlationId")
+            ),
+            "old_quantity": int(
+                broker_order.get("quantity")
+            ),
+            "old_trigger": float(
+                broker_order.get("triggerPrice")
+            ),
+            "new_quantity": int(
+                request["quantity"]
+            ),
+            "new_trigger": float(
+                request["triggerPrice"]
+            ),
+            "created_at": self._now(),
+        }
+
+        reconciliation["sl_modification_intent"] = intent
+
+        self._save()
+
+        return intent
+
+    # ======================================================
+    # VERIFY MODIFIED ORDER
+    # ======================================================
+
+    def _verify_modified_order(
+        self,
+        original,
+        response,
+        request,
+    ):
+
+        if not isinstance(response, dict):
+            raise RuntimeError(
+                "Invalid SL modification verification response."
+            )
+
+        data = response.get("data", response)
+
+        if not isinstance(data, dict):
+            raise RuntimeError(
+                "SL verification data is invalid."
+            )
+
+        broker_id = str(
+            data.get("orderId")
+            or data.get("order_id")
+            or ""
+        )
+
+        original_id = str(
+            original.get("orderId")
+            or original.get("order_id")
+            or ""
+        )
+
+        if broker_id and broker_id != original_id:
+            raise RuntimeError(
+                "SL modification returned a different order ID."
+            )
+
+        quantity = data.get("quantity")
+
+        trigger = data.get("triggerPrice")
+
+        if quantity is not None:
+
+            if int(quantity) != int(request["quantity"]):
+                raise RuntimeError(
+                    "Modified SL quantity verification failed."
+                )
+
+        if trigger is not None:
+
+            if float(trigger) != float(request["triggerPrice"]):
+                raise RuntimeError(
+                    "Modified SL trigger verification failed."
+                )
+
+        return True
+
+    # ======================================================
+    # MODIFY EXISTING SL
+    # ======================================================
+
+    def modify_existing_sl(
+        self,
+        broker_order,
+        desired,
+    ):
+
+        self._check_lock()
+
+        # Hard release switch. This remains False until
+        # the complete engine and persistence are verified.
+        if LIVE_SL_MODIFICATION_RELEASED is not True:
+            raise RuntimeError(
+                "Live SL modification release is disabled."
+            )
+
+        if config.LIVE_TRADING_ENABLED is not True:
+            raise RuntimeError(
+                "Live trading is disabled."
+            )
+
+        if config.ORDER_PLACEMENT_ENABLED is not True:
+            raise RuntimeError(
+                "Order modification permission is disabled."
+            )
+
+        order_id = (
+            broker_order.get("orderId")
+            or broker_order.get("order_id")
+        )
+
+        correlation_id = (
+            broker_order.get("correlationId")
+            or broker_order.get("correlation_id")
+        )
+
+        registered = self._find_registered_sl(
+            order_id,
+            correlation_id,
+        )
+
+        validated = self._validate_registered_sl(
+            registered,
+            broker_order,
+        )
+
+        request = self.build_request(
+            broker_order,
+            desired,
+        )
+
+        intent = self._save_intent(
+            broker_order,
+            request,
+        )
+
+        try:
+
+            response = self.client.modify_order(
+                order_id,
+                request,
+            )
+
+        except Exception as error:
+
+            intent["status"] = "MODIFICATION_UNCERTAIN"
+            intent["error"] = str(error)
+            intent["updated_at"] = self._now()
+
+            self._save()
+
+            raise RuntimeError(
+                "SL modification outcome uncertain. "
+                "No automatic retry or cancel-replace is allowed."
+            )
+
+        if not isinstance(response, dict):
+
+            intent["status"] = "MODIFICATION_UNCERTAIN"
+            intent["error"] = "Invalid broker response."
+            intent["updated_at"] = self._now()
+
+            self._save()
+
+            raise RuntimeError(
+                "SL modification response is invalid."
+            )
+
+        if response.get("status") is not True:
+
+            intent["status"] = "MODIFICATION_UNCERTAIN"
+            intent["broker_response"] = response
+            intent["updated_at"] = self._now()
+
+            self._save()
+
+            raise RuntimeError(
+                "Broker did not confirm SL modification."
+            )
+
+        try:
+
+            verification = self.client.get_order_by_id(
+                order_id
+            )
+
+            self._verify_modified_order(
+                broker_order,
+                verification,
+                request,
+            )
+
+        except Exception as error:
+
+            intent["status"] = "VERIFICATION_REQUIRED"
+            intent["verification_error"] = str(error)
+            intent["updated_at"] = self._now()
+
+            self._save()
+
+            raise RuntimeError(
+                "SL modification requires broker verification. "
+                "No retry will occur."
+            )
+
+        intent["status"] = "VERIFIED"
+        intent["verified_at"] = self._now()
+
+        record = registered["record"]
+
+        record["quantity"] = int(
+            request["quantity"]
+        )
+
+        record["payload"]["quantity"] = int(
+            request["quantity"]
+        )
+
+        record["payload"]["triggerPrice"] = float(
+            request["triggerPrice"]
+        )
+
+        record["updated_at"] = self._now()
+
+        self._save()
+
+        return {
+            "success": True,
+            "order_id": str(order_id),
+            "quantity": int(request["quantity"]),
+            "trigger_price": float(request["triggerPrice"]),
+            "status": "VERIFIED",
+        }
