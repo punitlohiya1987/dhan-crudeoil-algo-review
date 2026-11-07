@@ -395,6 +395,97 @@ class CrudeOilMainEngine:
         }
 
     # ======================================================
+    # NEXT GRID LIMIT ORCHESTRATION
+    # ======================================================
+
+    def submit_next_grid_entry_if_ready(self):
+        """
+        Submit the next resting LIMIT only after the preceding entry is
+        completely TRADED and all registered open quantity has confirmed
+        common-SL protection. Existing/uncertain intents are never retried.
+        """
+        strategy = self.state.get("strategy", {})
+        if strategy.get("cycle_active") is not True or strategy.get("cycle_closed") is not False:
+            return {"status": "CYCLE_NOT_ACTIVE"}
+
+        if self.state_store.is_locked(self.state, "ENTRY_LIMIT"):
+            raise RuntimeError("Next grid entry blocked by manual-cancellation lock.")
+
+        sequence = strategy.get("next_entry_sequence")
+        if sequence is None:
+            return {"status": "MAX_ENTRIES_OR_NO_NEXT_ENTRY"}
+        try:
+            sequence = int(sequence)
+        except (TypeError, ValueError):
+            raise RuntimeError("Saved next entry sequence is invalid.")
+        if sequence <= 1:
+            return {"status": "FIRST_ENTRY_NOT_YET_COMPLETED"}
+
+        entry_group = self.state.get("orders", {}).get("pending_entry_orders", {})
+        if not isinstance(entry_group, dict):
+            raise RuntimeError("Saved entry-order group is invalid.")
+
+        same_sequence = [
+            record for record in entry_group.values()
+            if isinstance(record, dict)
+            and int(record.get("sequence", 0) or 0) == sequence
+        ]
+        if same_sequence:
+            # Any prior intent for this sequence, including uncertain or
+            # terminal, is a hard no-resubmit condition.
+            return {
+                "status": "ENTRY_INTENT_ALREADY_EXISTS",
+                "sequence": sequence,
+            }
+
+        previous = [
+            record for record in entry_group.values()
+            if isinstance(record, dict)
+            and int(record.get("sequence", 0) or 0) == sequence - 1
+        ]
+        if len(previous) != 1:
+            raise RuntimeError("Exactly one preceding entry record is required.")
+        previous_record = previous[0]
+        if (
+            str(previous_record.get("status", "")).upper() != "TRADED"
+            or previous_record.get("entry_complete") is not True
+        ):
+            return {"status": "PREVIOUS_ENTRY_NOT_FULLY_TRADED"}
+
+        for record in entry_group.values():
+            if not isinstance(record, dict):
+                raise RuntimeError("Invalid saved entry order record.")
+            if str(record.get("status", "")).upper() in self.order_manager.ACTIVE_STATUSES:
+                raise RuntimeError("Another entry order is still active; overlap is prohibited.")
+
+        positions = self.state.get("positions", {})
+        total_open = int(positions.get("total_quantity", 0) or 0)
+        protected = int(positions.get("common_stop_loss_quantity", 0) or 0)
+        if total_open <= 0 or protected != total_open:
+            return {"status": "WAITING_FOR_CONFIRMED_SL_PROTECTION"}
+
+        next_price = self.state.get("prices", {}).get("next_grid")
+        if next_price is None:
+            return {"status": "NO_NEXT_GRID_PRICE"}
+
+        result = self.order_manager.submit_entry(
+            sequence=sequence,
+            price=float(next_price),
+        )
+        self.log(
+            "Next grid LIMIT submitted and recorded: sequence="
+            + str(sequence)
+            + " order_id="
+            + str(result.get("order_id"))
+        )
+        return {
+            "status": "NEXT_GRID_LIMIT_SUBMITTED",
+            "sequence": sequence,
+            "price": float(next_price),
+            "order": result,
+        }
+
+    # ======================================================
     # STOP LOSS ASSESSMENT
     # ======================================================
 
@@ -784,6 +875,10 @@ class CrudeOilMainEngine:
         self.ensure_stop_loss_protection()
 
         self.assess_stop_loss()
+
+        # Only after the broker order book confirms complete SL coverage
+        # may the next resting grid LIMIT be submitted.
+        self.submit_next_grid_entry_if_ready()
 
         self.read_ltp()
 
