@@ -254,10 +254,11 @@ class CrudeOilGridStrategy:
         return plan
 
     # ======================================================
-    # GRID TRIGGER
+    # ======================================================
+    # NEXT PENDING LIMIT ORDER AFTER A FILL
     # ======================================================
 
-    def check_grid_trigger(self, ltp):
+    def build_next_entry_order(self):
 
         if not self.cycle_active or self.cycle_closed:
             return None
@@ -265,43 +266,30 @@ class CrudeOilGridStrategy:
         if self.next_grid_price is None:
             return None
 
-        ltp = self._valid_price(ltp, "LTP")
-
         if self.entry_count >= self.maximum_entries:
             return None
 
-        # This reports a price condition only.
-        # It does not submit an order.
+        # Prepare the next pending LIMIT immediately after the
+        # previous entry fill is registered. Do not wait for LTP
+        # to touch the grid level; the broker holds this LIMIT.
+        return {
+            "triggered": True,
+            "direction": self.direction,
+            "order_type": "LIMIT",
+            "limit_price": float(self.next_grid_price),
+            "sequence": self.entry_count + 1,
+            "quantity": self.quantity_per_entry,
+        }
 
-        if self.direction == "SELL":
-
-            if ltp >= self.next_grid_price:
-
-                return {
-                    "triggered": True,
-                    "direction": "SELL",
-                    "order_type": "LIMIT",
-                    "limit_price": float(self.next_grid_price),
-                    "sequence": self.entry_count + 1,
-                    "quantity": self.quantity_per_entry,
-                }
-
-        else:
-
-            if ltp <= self.next_grid_price:
-
-                return {
-                    "triggered": True,
-                    "direction": "BUY",
-                    "order_type": "LIMIT",
-                    "limit_price": float(self.next_grid_price),
-                    "sequence": self.entry_count + 1,
-                    "quantity": self.quantity_per_entry,
-                }
-
-        return None
+    def check_grid_trigger(self, ltp=None):
+        # Backward-compatible alias. LTP is validated if supplied,
+        # but it does not gate placement of the next pending LIMIT.
+        if ltp is not None:
+            self._valid_price(ltp, "LTP")
+        return self.build_next_entry_order()
 
     # ======================================================
+
     # CUMULATIVE FILL DELTA
     # ======================================================
 
