@@ -468,11 +468,20 @@ class StopLossExecutor:
             self.state["strategy"].get("direction", "")
         ).upper()
 
-        self._validate_tightening(
-            direction,
-            current_trigger,
-            desired_trigger,
-        )
+        # Equal trigger is allowed only for an in-place quantity
+        # adjustment (for example, protecting a newly filled entry lot).
+        # A looser trigger is never allowed.
+        if desired_trigger == current_trigger:
+            if target_original_quantity == current_quantity:
+                raise RuntimeError(
+                    "SL quantity and trigger already match; modification is unnecessary."
+                )
+        else:
+            self._validate_tightening(
+                direction,
+                current_trigger,
+                desired_trigger,
+            )
 
         return {
             "orderType": "STOP_LOSS_MARKET",
