@@ -91,10 +91,10 @@ class ExecutionGuard:
             return False, "Active contract section is invalid."
 
         expected = {
-            "symbol": self.config.get("ACTIVE_SYMBOL"),
-            "security_id": self.config.get("ACTIVE_SECURITY_ID"),
-            "expiry": self.config.get("ACTIVE_EXPIRY"),
-            "exchange_segment": self.config.get("EXCHANGE_SEGMENT"),
+            "symbol": self._config_value("ACTIVE_SYMBOL"),
+            "security_id": self._config_value("ACTIVE_SECURITY_ID"),
+            "expiry": self._config_value("ACTIVE_EXPIRY"),
+            "exchange_segment": self._config_value("EXCHANGE_SEGMENT"),
         }
 
         for field, configured_value in expected.items():
@@ -148,7 +148,7 @@ class ExecutionGuard:
         ).upper()
 
         configured_direction = str(
-            self.config.get("DIRECTION", "")
+            self._config_value("DIRECTION", "")
         ).upper()
 
         if direction not in ("BUY", "SELL"):
@@ -287,7 +287,7 @@ class ExecutionGuard:
 
     def _validate_manual_cancel_locks(self):
 
-        if self.config.get(
+        if self._config_value(
             "MANUAL_CANCEL_PROTECTION"
         ) is not True:
 
@@ -319,7 +319,7 @@ class ExecutionGuard:
 
     def _validate_reconciliation(self):
 
-        if self.config.get(
+        if self._config_value(
             "FRESH_EXECUTION_REQUIRES_RECONCILIATION"
         ) is not True:
 
@@ -456,7 +456,7 @@ class ExecutionGuard:
                 + result["reason"]
             )
 
-        if self.config.get(
+        if self._config_value(
             "LIVE_TRADING_ENABLED"
         ) is not True:
 
@@ -464,7 +464,7 @@ class ExecutionGuard:
                 "LIVE_TRADING_ENABLED is OFF."
             )
 
-        if self.config.get(
+        if self._config_value(
             "ORDER_PLACEMENT_ENABLED"
         ) is not True:
 
@@ -472,7 +472,7 @@ class ExecutionGuard:
                 "ORDER_PLACEMENT_ENABLED is OFF."
             )
 
-        if self.config.get(
+        if self._config_value(
             "REQUIRE_DURABLE_STATE_FOR_LIVE"
         ) is True:
 
