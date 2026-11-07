@@ -38,6 +38,22 @@ class ExecutionGuard:
         self.config = config or {}
         self.state = state or {}
 
+    def _config_value(self, key, default=None):
+        """Read config values from either a module or a dictionary."""
+        aliases = {
+            "ACTIVE_SECURITY_ID": "SECURITY_ID",
+            "MANUAL_CANCEL_PROTECTION": "MANUAL_CANCELLATION_LOCK_ENABLED",
+            "FRESH_EXECUTION_REQUIRES_RECONCILIATION": None,
+            "REQUIRE_DURABLE_STATE_FOR_LIVE": "REQUIRE_DURABLE_STATE",
+        }
+        actual_key = aliases.get(key, key)
+        if actual_key is None:
+            return True
+        if isinstance(self.config, dict):
+            return self.config.get(actual_key, default)
+        return getattr(self.config, actual_key, default)
+
+
         self.live_engine_released = bool(
             live_engine_released
         )
