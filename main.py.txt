@@ -266,6 +266,117 @@ class CrudeOilMainEngine:
         return result
 
     # ======================================================
+    # BROKER POSITION RECONCILIATION
+    # ======================================================
+
+    def reconcile_positions(self, response):
+        """Compare broker net positions with this algo's registered cycle only."""
+        if isinstance(response, str):
+            import json
+            try:
+                response = json.loads(response)
+            except Exception:
+                raise RuntimeError("Broker positions response is invalid JSON.")
+
+        if isinstance(response, dict):
+            status = response.get("status")
+            if status is not None and str(status).lower() not in (
+                "success", "true", "200", "ok"
+            ):
+                raise RuntimeError("Broker positions API reported failure.")
+            data = response.get("data")
+            if data is None:
+                data = response.get("positions")
+            if isinstance(data, dict):
+                data = data.get("positions")
+            response = data
+
+        if not isinstance(response, list):
+            raise RuntimeError("Broker positions response is not a supported list.")
+
+        active = self.state["active_contract"]
+        broker_qty = {
+            "MARGIN": {"LONG": 0, "SHORT": 0},
+            "INTRADAY": {"LONG": 0, "SHORT": 0},
+        }
+
+        for item in response:
+            if not isinstance(item, dict):
+                raise RuntimeError("Broker returned an invalid position record.")
+            security_id = item.get("securityId") or item.get("security_id")
+            segment = item.get("exchangeSegment") or item.get("exchange_segment")
+            if str(security_id) != str(active["security_id"]) or str(segment) != str(active["exchange_segment"]):
+                continue
+
+            product = str(item.get("productType") or item.get("product_type") or "").upper()
+            if product not in broker_qty:
+                raise RuntimeError("Unknown product type in active-contract broker position.")
+
+            raw_qty = item.get("netQty")
+            if raw_qty is None:
+                raw_qty = item.get("netQuantity")
+            if isinstance(raw_qty, bool):
+                raise RuntimeError("Boolean broker position quantity is invalid.")
+            try:
+                qty = int(raw_qty)
+            except (TypeError, ValueError):
+                raise RuntimeError("Broker position quantity is missing or invalid.")
+            if qty != raw_qty:
+                raise RuntimeError("Broker position quantity is not an integer.")
+            if qty == 0:
+                continue
+
+            side = str(item.get("positionType") or "").upper()
+            if side not in ("LONG", "SHORT"):
+                if qty > 0:
+                    side = "LONG"
+                else:
+                    side = "SHORT"
+            broker_qty[product][side] += abs(qty)
+
+        local_qty = {
+            "MARGIN": {"LONG": 0, "SHORT": 0},
+            "INTRADAY": {"LONG": 0, "SHORT": 0},
+        }
+        direction = str(self.state["strategy"].get("direction", "")).upper()
+        if direction not in ("BUY", "SELL"):
+            raise RuntimeError("Saved cycle direction is invalid.")
+        side = "LONG" if direction == "BUY" else "SHORT"
+
+        registered = self.state["positions"].get("registered_positions", {})
+        if not isinstance(registered, dict):
+            raise RuntimeError("Registered algo positions are invalid.")
+
+        for position_id, record in registered.items():
+            if not isinstance(record, dict):
+                raise RuntimeError("Invalid registered position: " + str(position_id))
+            product = str(record.get("product_type", "")).upper()
+            if product not in local_qty:
+                raise RuntimeError("Unsupported registered product type.")
+            try:
+                filled = int(record.get("filled_qty"))
+                closed = int(record.get("closed_qty", 0))
+            except (TypeError, ValueError):
+                raise RuntimeError("Invalid registered position quantities.")
+            if filled < 0 or closed < 0 or closed > filled:
+                raise RuntimeError("Registered position quantities are inconsistent.")
+            local_qty[product][side] += filled - closed
+
+        if broker_qty != local_qty:
+            raise RuntimeError(
+                "Broker/algo position mismatch. Broker=" + str(broker_qty)
+                + " Algo=" + str(local_qty)
+                + ". Existing positions will not be enrolled or modified."
+            )
+
+        self.state_store.update_reconciliation(
+            self.state,
+            positions_checked=True,
+        )
+        self.log("Broker positions exactly match registered algo quantities.")
+        return True
+
+    # ======================================================
     # RECONCILIATION CHECK
     # ======================================================
 
@@ -316,15 +427,8 @@ class CrudeOilMainEngine:
                 "Broker positions response is missing."
             )
 
-        # Mark positions as checked in state reconciliation
-        self.state_store.update_reconciliation(
-            self.state,
-            positions_checked=True,
-        )
-
-        self.log(
-            "Broker positions response received and reconciled."
-        )
+        # Response receipt alone is not reconciliation.
+        self.reconcile_positions(positions)
 
         self.assess_stop_loss()
 
