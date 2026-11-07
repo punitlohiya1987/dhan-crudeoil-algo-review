@@ -652,6 +652,27 @@ class OrderManager:
 
         strategy = self.state["strategy"]
 
+        # Before submitting any grid entry after the first, every
+        # currently registered open unit must already have broker-
+        # reconciled common SL protection. A partial fill resets this
+        # confirmation to zero in FillTracker, so the next LIMIT is
+        # blocked until protection is independently confirmed again.
+        if sequence > 1:
+            positions = self.state.get("positions", {})
+            total_open = self._positive_integer(
+                positions.get("total_quantity", 0),
+                "registered total open quantity",
+            ) if positions.get("total_quantity", 0) else 0
+            confirmed_sl = self._positive_integer(
+                positions.get("common_stop_loss_quantity", 0),
+                "broker-confirmed common SL quantity",
+            ) if positions.get("common_stop_loss_quantity", 0) else 0
+            if total_open <= 0 or confirmed_sl != total_open:
+                raise RuntimeError(
+                    "Next grid entry blocked: all existing open quantity "
+                    "must have independently reconciled common SL protection."
+                )
+
         direction = str(
             strategy.get("direction", "")
         ).upper()
