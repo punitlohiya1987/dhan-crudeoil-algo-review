@@ -21,7 +21,7 @@ from datetime import datetime
 import config
 
 
-LIVE_SL_MODIFICATION_RELEASED = False
+LIVE_SL_MODIFICATION_RELEASED = (\n    getattr(config, "LIVE_SL_MODIFICATION_RELEASED", False) is True\n)
 MAX_MODIFICATIONS_PER_ORDER = 25
 
 
@@ -722,7 +722,16 @@ class StopLossExecutor:
                 "SL modification response is invalid."
             )
 
-        if response.get("status") is not True:
+        broker_status = str(
+            response.get("orderStatus")
+            or response.get("status")
+            or ""
+        ).upper()
+
+        # Dhan V2 returns orderStatus (for example TRANSIT), not a
+        # boolean status=True. Only a non-terminal acknowledgement may
+        # proceed to a separate GET-by-order-ID verification.
+        if broker_status not in ("TRANSIT", "PENDING", "PART_TRADED", "MODIFIED"):
 
             intent["status"] = "MODIFICATION_UNCERTAIN"
             intent["broker_response"] = response
@@ -731,7 +740,8 @@ class StopLossExecutor:
             self._save()
 
             raise RuntimeError(
-                "Broker did not confirm SL modification."
+                "Dhan did not return a recognized modification acknowledgement. "
+                "No retry or cancel-replace will occur."
             )
 
         try:
