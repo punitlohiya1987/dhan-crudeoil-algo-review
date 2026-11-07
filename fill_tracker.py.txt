@@ -393,7 +393,10 @@ class FillTracker:
         positions["margin_quantity"] = margin
         positions["intraday_quantity"] = intraday
 
-        positions["common_stop_loss_quantity"] = total
+        # A fill changes open exposure. Do not claim that the new
+        # quantity is protected until the broker SL order book has been
+        # independently reconciled by StopLossController.
+        positions["common_stop_loss_quantity"] = 0
 
         positions["updated_at"] = self._now()
 
