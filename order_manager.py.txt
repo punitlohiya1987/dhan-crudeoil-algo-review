@@ -508,6 +508,12 @@ class OrderManager:
 
         self._save()
 
+        if order_status in ("REJECTED", "CANCELLED", "EXPIRED"):
+            raise RuntimeError(
+                "Broker recorded the order as " + order_status
+                + ". The intent remains recorded; automatic retry is prohibited."
+            )
+
         return {
             "success": True,
             "order_id": order_id,
