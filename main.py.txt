@@ -378,6 +378,68 @@ class CrudeOilMainEngine:
         return True
 
     # ======================================================
+    # EXPLICIT FRESH EXECUTION AUTHORIZATION (NO ORDER WRITES)
+    # ======================================================
+
+    def authorize_fresh_execution(self, execution_id):
+        """
+        Deliberate operator-invoked reset only. Verifies broker positions
+        and working orders for the active contract before releasing the
+        previous execution's cancellation locks. This method never places,
+        modifies, or cancels an order and is not called by run()/restart.
+        """
+        if not self.state_store or not self.state or not self.client:
+            raise RuntimeError("Engine must be initialized before fresh authorization.")
+
+        execution_id = str(execution_id or "").strip()
+        if not execution_id:
+            raise ValueError("A unique execution ID must be supplied explicitly.")
+
+        self._validate_active_contract()
+
+        # Position check: any non-flat broker position must match the
+        # previous registered cycle; begin_fresh_execution then requires
+        # that registered cycle itself is flat.
+        broker_positions = self.client.get_positions()
+        if broker_positions is None:
+            raise RuntimeError("Broker positions response is missing.")
+        self.reconcile_positions(broker_positions)
+
+        # Check every broker order for this exact contract, including
+        # orders not registered by this algo. Unknown working orders block.
+        broker_orders = self.order_monitor._extract_orders(
+            self.client.get_orders()
+        )
+        active_orders = [
+            order for order in broker_orders
+            if self.order_monitor._is_active_contract_order(order)
+        ]
+        working_statuses = self.order_monitor.ACTIVE_STATUSES
+        working = [
+            order for order in active_orders
+            if self.order_monitor._normalise_status(order) in working_statuses
+        ]
+        if working:
+            raise RuntimeError(
+                "Fresh execution denied: active-contract broker working orders exist."
+            )
+
+        # Only registered order history in terminal states can pass the
+        # state-store gate. Broker reconciliation is checked again there.
+        result = self.state_store.begin_fresh_execution(
+            state=self.state,
+            execution_id=execution_id,
+            broker_positions_flat=True,
+            broker_open_orders_clear=True,
+        )
+
+        self.log(
+            "Fresh execution authorized (no order placed): "
+            + execution_id
+        )
+        return result
+
+    # ======================================================
     # RECONCILIATION CHECK
     # ======================================================
 
