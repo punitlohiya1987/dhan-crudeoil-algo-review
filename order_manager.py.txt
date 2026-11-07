@@ -410,6 +410,17 @@ class OrderManager:
                 "Broker order submission blocked."
             )
 
+        if getattr(config, "LIVE_ENGINE_RELEASED", False) is not True:
+            raise RuntimeError(
+                "LIVE_ENGINE_RELEASED is OFF. Broker order submission blocked."
+            )
+
+        if getattr(config, "REQUIRE_DURABLE_STATE", True) is True:
+            if getattr(config, "DURABLE_STATE_VERIFIED", False) is not True:
+                raise RuntimeError(
+                    "Durable state is not verified. Broker order submission blocked."
+                )
+
         correlation_id = self._correlation_id(
             role,
             sequence,
