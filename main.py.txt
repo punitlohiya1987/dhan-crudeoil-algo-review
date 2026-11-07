@@ -315,14 +315,15 @@ class CrudeOilMainEngine:
             raw_qty = item.get("netQty")
             if raw_qty is None:
                 raw_qty = item.get("netQuantity")
-            if isinstance(raw_qty, bool):
-                raise RuntimeError("Boolean broker position quantity is invalid.")
+            if isinstance(raw_qty, bool) or raw_qty is None:
+                raise RuntimeError("Broker position quantity is missing or invalid.")
             try:
-                qty = int(raw_qty)
+                numeric_qty = float(str(raw_qty).strip())
             except (TypeError, ValueError):
                 raise RuntimeError("Broker position quantity is missing or invalid.")
-            if qty != raw_qty:
+            if not numeric_qty.is_integer():
                 raise RuntimeError("Broker position quantity is not an integer.")
+            qty = int(numeric_qty)
             if qty == 0:
                 continue
 
