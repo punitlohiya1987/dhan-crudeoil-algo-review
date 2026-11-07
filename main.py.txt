@@ -30,6 +30,7 @@ from execution_guard import ExecutionGuard
 from fill_tracker import FillTracker
 from order_monitor import OrderMonitor
 from sl_controller import StopLossController
+from order_manager import OrderManager
 
 
 # ==========================================================
@@ -67,6 +68,7 @@ class CrudeOilMainEngine:
         self.order_monitor = None
         self.sl_controller = None
         self.execution_guard = None
+        self.order_manager = None
 
     # ======================================================
     # LOGGING
@@ -127,6 +129,12 @@ class CrudeOilMainEngine:
             self.state,
             live_engine_released=False,
             durable_state_verified=False,
+        )
+
+        self.order_manager = OrderManager(
+            self.client,
+            self.state_store,
+            self.state,
         )
 
         self.log("State loaded and components initialized.")
@@ -443,6 +451,120 @@ class CrudeOilMainEngine:
             + execution_id
         )
         return result
+
+    # ======================================================
+    # EXPLICIT FIRST-ENTRY START (NO RESTART AUTO-START)
+    # ======================================================
+
+    def start_authorized_cycle(self):
+        """
+        Start only after authorize_fresh_execution() has been explicitly
+        completed for this execution ID. Rechecks flat positions and
+        absence of working active-contract orders immediately before the
+        first LIMIT. All release switches and durable-state verification
+        must be enabled deliberately; defaults remain OFF.
+        """
+        if not self.state or not self.client or not self.order_manager:
+            raise RuntimeError("Engine must be initialized before starting a cycle.")
+
+        strategy = self.state.get("strategy", {})
+        execution_id = strategy.get("execution_id")
+        if not isinstance(execution_id, str) or not execution_id.strip():
+            raise RuntimeError("No explicitly authorized fresh execution exists.")
+        if not strategy.get("fresh_execution_authorized_at"):
+            raise RuntimeError("Fresh execution authorization timestamp is missing.")
+        if strategy.get("cycle_active") is not False or strategy.get("cycle_closed") is not False:
+            raise RuntimeError("State is not waiting for an authorized first-cycle start.")
+
+        if self.state.get("manual_cancel_locks", {}).get("ENTRY_LIMIT") is True:
+            raise RuntimeError("Entry start blocked by manual-cancellation lock.")
+        if self.state.get("manual_cancel_locks", {}).get("STOP_LOSS") is True:
+            raise RuntimeError("Entry start blocked by stop-loss cancellation lock.")
+
+        release_checks = {
+            "TRADING_MODE": str(getattr(config, "TRADING_MODE", "")).upper() == "LIVE",
+            "LIVE_TRADING_ENABLED": getattr(config, "LIVE_TRADING_ENABLED", False) is True,
+            "ORDER_PLACEMENT_ENABLED": getattr(config, "ORDER_PLACEMENT_ENABLED", False) is True,
+            "LIVE_ENGINE_RELEASED": getattr(config, "LIVE_ENGINE_RELEASED", False) is True,
+            "DURABLE_STATE_VERIFIED": getattr(config, "DURABLE_STATE_VERIFIED", False) is True,
+        }
+        failed = [name for name, passed in release_checks.items() if not passed]
+        if failed:
+            raise RuntimeError(
+                "First entry blocked; release requirements are OFF/unverified: "
+                + ", ".join(failed)
+            )
+
+        self._validate_active_contract()
+
+        broker_positions = self.client.get_positions()
+        if broker_positions is None:
+            raise RuntimeError("Broker positions response is missing.")
+        self.reconcile_positions(broker_positions)
+
+        broker_orders = self.order_monitor._extract_orders(self.client.get_orders())
+        active_orders = [
+            order for order in broker_orders
+            if self.order_monitor._is_active_contract_order(order)
+        ]
+        working = [
+            order for order in active_orders
+            if self.order_monitor._normalise_status(order)
+            in self.order_monitor.ACTIVE_STATUSES
+        ]
+        if working:
+            raise RuntimeError(
+                "First entry blocked: active-contract working broker orders exist."
+            )
+
+        if self.state["positions"].get("total_quantity") != 0:
+            raise RuntimeError("First entry requires zero registered open quantity.")
+        if self.state_store.has_unresolved_intents(self.state):
+            raise RuntimeError("First entry blocked by an unresolved saved order intent.")
+
+        ltp = self.read_ltp()
+        plan = self.order_manager.calculate_first_cycle(ltp)
+
+        # Persist cycle state before the write-ahead order intent. If the
+        # broker outcome is uncertain, a restart must not submit a duplicate.
+        strategy["cycle_active"] = True
+        strategy["cycle_closed"] = False
+        strategy["initial_entry"] = plan["entry_price"]
+        strategy["last_entry"] = None
+        strategy["next_grid"] = plan["next_grid"]
+        strategy["common_stop_loss"] = plan["stop_loss"]
+        strategy["entry_count"] = 0
+        strategy["next_entry_sequence"] = 1
+        strategy["direction"] = str(getattr(config, "DIRECTION", "")).upper()
+        strategy["grid_points"] = int(config.GRID_POINTS)
+        strategy["stop_loss_points"] = int(config.STOP_LOSS_POINTS)
+        strategy["maximum_entries"] = int(config.MAX_ENTRIES)
+        strategy["quantity_per_entry"] = int(config.QUANTITY_PER_ENTRY)
+        strategy["lot_size"] = int(config.LOT_SIZE)
+        strategy["lots_per_entry"] = int(config.LOTS_PER_ENTRY)
+
+        prices = self.state["prices"]
+        prices["initial_entry"] = plan["entry_price"]
+        prices["last_entry"] = None
+        prices["next_grid"] = plan["next_grid"]
+        prices["common_stop_loss"] = plan["stop_loss"]
+
+        self.state["reconciliation"]["positions_checked"] = True
+        self.state["reconciliation"]["orders_checked"] = True
+        self.state_store.save(self.state)
+
+        result = self.order_manager.submit_entry(
+            sequence=1,
+            price=plan["entry_price"],
+        )
+
+        self.log("First LIMIT entry submitted and recorded: " + str(result.get("order_id")))
+        return {
+            "started": True,
+            "execution_id": execution_id,
+            "entry": plan,
+            "order": result,
+        }
 
     # ======================================================
     # RECONCILIATION CHECK
