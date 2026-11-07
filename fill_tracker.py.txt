@@ -685,6 +685,35 @@ class FillTracker:
             "registered_positions"
         ]
 
+        # Validate the full exit delta before mutating any position record.
+        # A broker overfill or inconsistent cumulative update must fail
+        # atomically rather than partially closing the local ledger.
+        total_open_quantity = 0
+        for position_id, position in registered.items():
+            if not isinstance(position, dict):
+                raise RuntimeError(
+                    "Invalid registered position: " + str(position_id)
+                )
+            filled = self._integer(
+                position.get("filled_qty"),
+                "position filled quantity",
+            )
+            closed = self._integer(
+                position.get("closed_qty", 0),
+                "position closed quantity",
+            )
+            if closed > filled:
+                raise RuntimeError(
+                    "Position closed quantity exceeds filled quantity."
+                )
+            total_open_quantity += filled - closed
+
+        if delta > total_open_quantity:
+            raise RuntimeError(
+                "Exit fill exceeds registered open position quantity. "
+                "No local positions were changed."
+            )
+
         remaining_exit_quantity = delta
 
         for position_id in list(registered.keys()):
