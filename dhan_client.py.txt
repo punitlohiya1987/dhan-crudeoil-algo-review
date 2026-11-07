@@ -432,14 +432,67 @@ class DhanClient:
         return ltp
 
     # ======================================================
-    # ORDER PLACEMENT - LOCKED
+    # ORDER PLACEMENT - STRICTLY GATED
     # ======================================================
 
     def place_order(self, payload):
+        """Submit only approved LIMIT entries or protective SL-M orders."""
+        if not isinstance(payload, dict):
+            raise RuntimeError("Order payload must be a dictionary.")
 
-        raise RuntimeError(
-            "Order placement is locked in this build. "
-            "No broker order was submitted."
+        required = (
+            "dhanClientId", "correlationId", "transactionType",
+            "exchangeSegment", "productType", "orderType", "validity",
+            "securityId", "quantity", "price", "triggerPrice",
+        )
+        missing = [key for key in required if key not in payload]
+        if missing:
+            raise RuntimeError("Order payload missing fields: " + ", ".join(missing))
+
+        if str(payload["exchangeSegment"]) != str(config.EXCHANGE_SEGMENT):
+            raise RuntimeError("Order blocked: exchange segment mismatch.")
+        if str(payload["securityId"]) != str(config.SECURITY_ID):
+            raise RuntimeError("Order blocked: security ID mismatch.")
+        if str(payload["dhanClientId"]) != self.client_id:
+            raise RuntimeError("Order blocked: client ID mismatch.")
+
+        transaction = str(payload["transactionType"]).upper()
+        product = str(payload["productType"]).upper()
+        order_type = str(payload["orderType"]).upper()
+        validity = str(payload["validity"]).upper()
+
+        if transaction not in ("BUY", "SELL"):
+            raise RuntimeError("Invalid order transaction type.")
+        if product not in ("MARGIN", "INTRADAY"):
+            raise RuntimeError("Unsupported order product type.")
+        if validity != "DAY":
+            raise RuntimeError("Only DAY validity is allowed.")
+
+        try:
+            quantity = int(payload["quantity"])
+        except (TypeError, ValueError):
+            raise RuntimeError("Order quantity must be a positive integer.")
+        if isinstance(payload["quantity"], bool) or quantity <= 0 or quantity != payload["quantity"]:
+            raise RuntimeError("Order quantity must be a positive integer.")
+
+        if order_type == "LIMIT":
+            if config.ALLOW_LIMIT_ENTRY is not True:
+                raise RuntimeError("Limit entry order type is disabled.")
+            if float(payload["price"]) <= 0 or float(payload["triggerPrice"]) != 0:
+                raise RuntimeError("Invalid LIMIT order price fields.")
+        elif order_type == "STOP_LOSS_MARKET":
+            if config.ALLOW_STOP_LOSS_MARKET is not True:
+                raise RuntimeError("Stop-loss market order type is disabled.")
+            if float(payload["triggerPrice"]) <= 0 or float(payload["price"]) != 0:
+                raise RuntimeError("Invalid STOP_LOSS_MARKET price fields.")
+        else:
+            raise RuntimeError("Only LIMIT and STOP_LOSS_MARKET orders are permitted.")
+
+        return self._request(
+            "/orders",
+            method="POST",
+            payload=payload,
+            allow_write=True,
         )
 
     # ======================================================
