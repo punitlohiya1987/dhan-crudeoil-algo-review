@@ -22,6 +22,7 @@ import config
 
 
 LIVE_SL_MODIFICATION_RELEASED = False
+MAX_MODIFICATIONS_PER_ORDER = 25
 
 
 class StopLossExecutor:
@@ -489,7 +490,23 @@ class StopLossExecutor:
         self,
         broker_order,
         request,
+        registered,
     ):
+
+        record = registered["record"]
+        modification_count = self._integer(
+            record.get("modification_count", 0),
+            "saved SL modification count",
+        )
+
+        if modification_count >= MAX_MODIFICATIONS_PER_ORDER:
+            raise RuntimeError(
+                "SL modification limit reached for this broker order ID."
+            )
+
+        # Count every persisted attempt, including uncertain outcomes.
+        # An ambiguous broker response must never allow the limit to be bypassed.
+        record["modification_count"] = modification_count + 1
 
         reconciliation = self.state.setdefault(
             "reconciliation",
@@ -661,6 +678,7 @@ class StopLossExecutor:
         intent = self._save_intent(
             broker_order,
             request,
+            registered,
         )
 
         try:
