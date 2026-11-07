@@ -424,6 +424,11 @@ class CrudeOilMainEngine:
                 "Fresh execution denied: active-contract broker working orders exist."
             )
 
+        self.state_store.update_reconciliation(
+            self.state,
+            orders_checked=True,
+        )
+
         # Only registered order history in terminal states can pass the
         # state-store gate. Broker reconciliation is checked again there.
         result = self.state_store.begin_fresh_execution(
