@@ -356,12 +356,13 @@ class OrderManager:
             return None
 
         data = response.get("data")
-
         if not isinstance(data, dict):
-            return None
+            data = {}
 
         order_id = (
-            data.get("orderId")
+            response.get("orderId")
+            or response.get("order_id")
+            or data.get("orderId")
             or data.get("order_id")
         )
 
@@ -462,21 +463,28 @@ class OrderManager:
                 "Submission outcome is uncertain."
             )
 
-        if response.get("status") is not True:
+        order_status = str(
+            response.get("orderStatus")
+            or response.get("status")
+            or ""
+        ).upper()
 
+        order_id = self._extract_order_id(
+            response
+        )
+
+        if not order_id or order_status not in (
+            "TRANSIT", "PENDING", "PART_TRADED", "TRADED"
+        ):
             self._mark_uncertain(
                 record,
                 response,
             )
 
             raise RuntimeError(
-                "Broker did not confirm successful submission. "
+                "Broker response did not confirm a valid order ID/status. "
                 "Intent locked against automatic retry."
             )
-
-        order_id = self._extract_order_id(
-            response
-        )
 
         if not order_id:
 
