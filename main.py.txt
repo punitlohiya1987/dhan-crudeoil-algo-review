@@ -20,7 +20,8 @@
 
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, time as datetime_time
+from zoneinfo import ZoneInfo
 
 import config
 
@@ -179,6 +180,13 @@ class CrudeOilMainEngine:
             config.ACTIVE_SYMBOL
         )
 
+        expected_expiry = str(config.ACTIVE_EXPIRY)
+
+        if str(active.get("expiry")) != expected_expiry:
+            raise RuntimeError(
+                "State contract expiry does not match config."
+            )
+
         if str(active.get("security_id")) != expected_security_id:
             raise RuntimeError(
                 "State security ID does not match config."
@@ -194,6 +202,40 @@ class CrudeOilMainEngine:
                 "State active symbol does not match config."
             )
 
+        return True
+
+    # ======================================================
+    # NEW-ENTRY RISK WINDOW
+    # ======================================================
+
+    def _validate_new_entry_window(self):
+        """
+        Prevent fresh entries too close to configured futures expiry
+        and after the configured India-time entry cut-off. This does
+        not perform an automatic square-off or contract rollover.
+        """
+        now = datetime.now(ZoneInfo("Asia/Kolkata"))
+        expiry = datetime.strptime(
+            str(config.ACTIVE_EXPIRY),
+            "%Y-%m-%d",
+        ).date()
+        days_to_expiry = (expiry - now.date()).days
+        rollover_days = int(getattr(config, "EXPIRY_ROLLOVER_DAYS", 0))
+        if days_to_expiry <= rollover_days:
+            raise RuntimeError(
+                "New entry blocked: contract is within configured expiry-rollover window."
+            )
+
+        square_off = datetime.strptime(
+            str(config.SQUARE_OFF_TIME),
+            "%H:%M",
+        ).time()
+        if now.time() >= square_off:
+            raise RuntimeError(
+                "New entry blocked after configured square-off time. "
+                "Existing broker SL protection remains responsible; "
+                "automatic square-off is not implemented."
+            )
         return True
 
     # ======================================================
@@ -465,6 +507,12 @@ class CrudeOilMainEngine:
         protected = int(positions.get("common_stop_loss_quantity", 0) or 0)
         if total_open <= 0 or protected != total_open:
             return {"status": "WAITING_FOR_CONFIRMED_SL_PROTECTION"}
+
+        try:
+            self._validate_new_entry_window()
+        except RuntimeError as error:
+            self.log("Next grid entry held by risk window: " + str(error))
+            return {"status": "NEW_ENTRY_WINDOW_CLOSED", "reason": str(error)}
 
         next_price = self.state.get("prices", {}).get("next_grid")
         if next_price is None:
@@ -745,6 +793,7 @@ class CrudeOilMainEngine:
             )
 
         self._validate_active_contract()
+        self._validate_new_entry_window()
 
         broker_positions = self.client.get_positions()
         if broker_positions is None:
