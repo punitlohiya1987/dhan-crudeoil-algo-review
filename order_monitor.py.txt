@@ -516,6 +516,23 @@ class OrderMonitor:
 
         registered_orders = self._registered_orders()
 
+        # A broker rejection/expiry is a terminal execution fault, not
+        # permission to submit a replacement after a process restart.
+        # Keep the engine fail-closed until an operator explicitly
+        # authorizes a fresh execution after flat-position/order checks.
+        for registered in registered_orders:
+            saved_status = str(
+                registered["record"].get("status", "")
+            ).upper()
+            if saved_status in ("REJECTED", "EXPIRED"):
+                raise RuntimeError(
+                    "Previously rejected/expired algo order remains a "
+                    "terminal execution fault: "
+                    + registered["correlation_id"]
+                    + ". Automatic retry is prohibited."
+                )
+
+
         # Unknown/manual active-contract working orders must stop the engine.
         registered_by_correlation = {
             item["correlation_id"]: item
