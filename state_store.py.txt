@@ -640,6 +640,87 @@ class StateStore:
     # RECONCILIATION
     # ======================================================
 
+    def begin_fresh_execution(
+        self,
+        state,
+        execution_id,
+        broker_positions_flat=False,
+        broker_open_orders_clear=False,
+    ):
+        """
+        Release cancellation locks only for an explicit new execution,
+        after broker checks confirm this contract is flat and has no
+        working orders. Never call automatically on process restart.
+        """
+        self.validate(state, verify_checksum=True)
+
+        execution_id = str(execution_id or "").strip()
+        if not execution_id:
+            raise ValueError("A new execution ID is required.")
+
+        strategy = state["strategy"]
+        positions = state["positions"]
+        orders = state["orders"]
+
+        if strategy.get("cycle_active") is not False:
+            raise RuntimeError("Cannot begin a fresh execution while a cycle is active.")
+        if strategy.get("cycle_closed") is not True:
+            raise RuntimeError("Previous cycle is not confirmed closed.")
+        if strategy.get("execution_id") == execution_id:
+            raise RuntimeError("Fresh execution ID must be new and unique.")
+        if positions.get("total_quantity") != 0:
+            raise RuntimeError("Registered positions remain; fresh execution denied.")
+
+        for record in positions.get("registered_positions", {}).values():
+            if int(record.get("filled_qty", 0)) != int(record.get("closed_qty", 0)):
+                raise RuntimeError("Registered open quantity remains; fresh execution denied.")
+
+        if broker_positions_flat is not True:
+            raise RuntimeError("Fresh broker position-flat confirmation is required.")
+        if broker_open_orders_clear is not True:
+            raise RuntimeError("Fresh broker no-working-orders confirmation is required.")
+
+        terminal = {"TRADED", "FILLED", "CANCELLED", "REJECTED", "EXPIRED"}
+        for group_name in ("pending_entry_orders", "stop_loss_orders"):
+            group = orders.get(group_name, {})
+            if not isinstance(group, dict):
+                raise RuntimeError("Invalid saved order group: " + group_name)
+            for key, record in group.items():
+                status = str(record.get("status", "")).upper()
+                if status not in terminal:
+                    raise RuntimeError(
+                        "Saved order is not terminal; fresh execution denied: "
+                        + group_name + "/" + str(key)
+                    )
+
+        # Persist a copy first: a failed save must not clear in-memory locks.
+        candidate = json.loads(self._canonical_json(state))
+        candidate_strategy = candidate["strategy"]
+        candidate_strategy["execution_id"] = execution_id
+        candidate_strategy["cycle_active"] = False
+        candidate_strategy["cycle_closed"] = False
+        candidate_strategy["fresh_execution_authorized_at"] = self._now()
+
+        candidate["manual_cancel_locks"]["ENTRY_LIMIT"] = False
+        candidate["manual_cancel_locks"]["STOP_LOSS"] = False
+        candidate["manual_cancel_locks"]["status"] = "UNLOCKED"
+        candidate["manual_cancel_locks"]["updated_at"] = self._now()
+
+        # Preserve old cancellation records as an audit trail.
+        candidate["reconciliation"]["positions_checked"] = False
+        candidate["reconciliation"]["orders_checked"] = False
+        candidate["reconciliation"]["fresh_execution_authorized_at"] = self._now()
+
+        self.save(candidate)
+        state.clear()
+        state.update(candidate)
+        return {
+            "authorized": True,
+            "execution_id": execution_id,
+            "locks_reset": True,
+            "historical_cancellation_records_preserved": True,
+        }
+
     def update_reconciliation(
         self,
         state,
