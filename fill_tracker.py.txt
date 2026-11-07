@@ -619,7 +619,7 @@ class FillTracker:
 
         prices = self.state["prices"]
 
-        prices["last_entry"] = incremental_average
+        prices["last_entry"] = new_position_average
 
         if prices.get("initial_entry") is None:
             prices["initial_entry"] = incremental_average
