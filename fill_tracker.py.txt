@@ -859,6 +859,11 @@ class FillTracker:
                 "Unknown broker order status: " + status
             )
 
+        if status == "TRADED" and cumulative_quantity != expected_quantity:
+            raise RuntimeError(
+                "Broker reports TRADED but cumulative fill quantity does not equal order quantity."
+            )
+
         changed = False
 
         if group_name == "pending_entry_orders":
