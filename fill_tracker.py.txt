@@ -624,9 +624,26 @@ class FillTracker:
         if prices.get("initial_entry") is None:
             prices["initial_entry"] = incremental_average
 
+        # Base the common SL on the weighted average of this registered
+        # entry position, not merely the latest partial-fill slice.
         self._tighten_common_sl(
-            incremental_average
+            new_position_average
         )
+
+        # Count an entry sequence once, on its first actual fill. The next
+        # grid price is deliberately NOT armed until the broker confirms
+        # this LIMIT order is fully TRADED.
+        sequence = self._integer(
+            saved_record.get("sequence"),
+            "entry sequence",
+        )
+        strategy = self.state["strategy"]
+        strategy["entry_count"] = max(
+            int(strategy.get("entry_count", 0) or 0),
+            sequence,
+        )
+        strategy["last_entry_sequence"] = sequence
+        strategy["last_entry_order_correlation_id"] = str(correlation_id)
 
         fill_totals[str(correlation_id)] = {
             "filled_qty": cumulative_quantity,
@@ -870,6 +887,44 @@ class FillTracker:
         saved_record["status"] = status
         saved_record["broker_status"] = status
         saved_record["last_observed_at"] = self._now()
+
+        if group_name == "pending_entry_orders" and status == "TRADED":
+            # Arm the next resting LIMIT level only after the current entry
+            # is completely filled. This prevents overlapping entry orders
+            # while a partial fill is still working.
+            strategy = self.state["strategy"]
+            sequence = self._integer(
+                saved_record.get("sequence"),
+                "entry sequence",
+            )
+            maximum_entries = self._integer(
+                strategy.get("maximum_entries"),
+                "maximum entries",
+            )
+            grid_points = self._integer(
+                strategy.get("grid_points"),
+                "grid points",
+            )
+            if sequence >= maximum_entries:
+                self.state["prices"]["next_grid"] = None
+                strategy["next_entry_sequence"] = None
+            else:
+                final_entry_average = self._price(
+                    cumulative_average,
+                    "final entry average price",
+                )
+                direction = str(strategy.get("direction", "")).upper()
+                if direction == "SELL":
+                    next_grid = final_entry_average - grid_points
+                elif direction == "BUY":
+                    next_grid = final_entry_average + grid_points
+                else:
+                    raise RuntimeError("Invalid strategy direction for next grid.")
+                if next_grid <= 0:
+                    raise RuntimeError("Calculated next grid price is invalid.")
+                self.state["prices"]["next_grid"] = float(next_grid)
+                strategy["next_entry_sequence"] = sequence + 1
+            saved_record["entry_complete"] = True
 
         broker_order_id = (
             broker_order.get("orderId")
