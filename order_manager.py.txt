@@ -29,7 +29,6 @@ class OrderManager:
         "TRANSIT",
         "PART_TRADED",
         "OPEN",
-        "TRADED",
     }
 
     UNRESOLVED_STATUSES = {
