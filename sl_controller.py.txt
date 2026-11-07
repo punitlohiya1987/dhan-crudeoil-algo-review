@@ -784,6 +784,16 @@ class StopLossController:
                         + registered["order_id"]
                     )
 
+        # Only this broker-backed assessment may mark exposure as
+        # protected. FillTracker resets this field to zero after every
+        # fill until all product-specific SL orders are confirmed here.
+        confirmed_total = (
+            quantities["MARGIN"] + quantities["INTRADAY"]
+        )
+        self.state["positions"]["common_stop_loss_quantity"] = (
+            confirmed_total
+        )
+
         result = {
             "status": "PROTECTION_CONFIRMED",
             "required": False,
