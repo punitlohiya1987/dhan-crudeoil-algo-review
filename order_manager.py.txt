@@ -474,7 +474,8 @@ class OrderManager:
         )
 
         if not order_id or order_status not in (
-            "TRANSIT", "PENDING", "PART_TRADED", "TRADED"
+            "TRANSIT", "PENDING", "PART_TRADED",
+            "TRADED", "REJECTED", "CANCELLED", "EXPIRED"
         ):
             self._mark_uncertain(
                 record,
@@ -486,23 +487,11 @@ class OrderManager:
                 "Intent locked against automatic retry."
             )
 
-        if not order_id:
-
-            self._mark_uncertain(
-                record,
-                "Successful response without order ID.",
-            )
-
-            raise RuntimeError(
-                "Broker response did not contain an order ID. "
-                "Submission outcome requires manual verification."
-            )
-
         record["order_id"] = order_id
-        record["status"] = "PENDING"
+        record["status"] = order_status
         record["broker_response"] = {
             "orderId": order_id,
-            "status": response.get("status"),
+            "orderStatus": order_status,
         }
         record["updated_at"] = self._now()
 
@@ -512,7 +501,7 @@ class OrderManager:
             "success": True,
             "order_id": order_id,
             "correlation_id": correlation_id,
-            "status": "PENDING",
+            "status": order_status,
         }
 
     # ======================================================
