@@ -661,13 +661,63 @@ class StopLossController:
 
         quantities = self._registered_quantities()
 
-        expected_trigger = self._expected_trigger()
-
         registered_sl = self._registered_sl_orders()
 
         active_sl_orders = self._active_contract_stop_orders(
             orders
         )
+
+        # A flat, fresh state has no common SL price yet. Confirm that
+        # there is also no active or unresolved registered SL order, then
+        # report the legitimate no-position state instead of failing on
+        # a missing trigger price.
+        total_open_quantity = (
+            quantities["MARGIN"] + quantities["INTRADAY"]
+        )
+
+        if total_open_quantity == 0:
+
+            if active_sl_orders:
+                raise RuntimeError(
+                    "Active-contract SL order exists while algo has no registered open position."
+                )
+
+            for registered in registered_sl:
+                record_status = str(
+                    registered["record"].get("status", "")
+                ).upper()
+                if record_status not in self.TERMINAL_STATUSES:
+                    raise RuntimeError(
+                        "Unresolved registered SL exists while algo has no open position: "
+                        + registered["key"]
+                    )
+
+            self.state["positions"]["common_stop_loss_quantity"] = 0
+
+            result = {
+                "status": "NO_OPEN_POSITION",
+                "required": False,
+                "confirmed": True,
+                "direction": str(
+                    self.state["strategy"].get("direction", "")
+                ).upper(),
+                "common_trigger_price": None,
+                "total_registered_quantity": 0,
+                "product_quantities": dict(quantities),
+                "stop_loss_orders": [],
+                "read_only": True,
+                "timestamp": self._now(),
+            }
+
+            self.state.setdefault(
+                "reconciliation",
+                {},
+            )["last_sl_assessment"] = result
+
+            self.state_store.save(self.state)
+            return result
+
+        expected_trigger = self._expected_trigger()
 
         direction = str(
             self.state["strategy"].get("direction", "")
