@@ -507,14 +507,54 @@ class DhanClient:
         )
 
     # ======================================================
-    # ORDER MODIFICATION - LOCKED
+    # ORDER MODIFICATION - STRICTLY GATED
     # ======================================================
 
     def modify_order(self, order_id, payload):
+        """
+        Modify one existing pending order in place.
+        This route is retained for the SL executor only; all release
+        switches default OFF and no cancel/replace fallback exists.
+        """
+        if not order_id or not isinstance(payload, dict):
+            raise RuntimeError("A broker order ID and modification payload are required.")
 
-        raise RuntimeError(
-            "Order modification is locked in this build. "
-            "No broker modification was submitted."
+        if getattr(config, "SL_MODIFICATION_ENABLED", False) is not True:
+            raise RuntimeError("SL_MODIFICATION_ENABLED is OFF; modification blocked.")
+
+        if getattr(config, "LIVE_SL_MODIFICATION_RELEASED", False) is not True:
+            raise RuntimeError("LIVE_SL_MODIFICATION_RELEASED is OFF; modification blocked.")
+
+        required = ("orderType", "quantity", "price", "triggerPrice", "validity")
+        missing = [key for key in required if key not in payload]
+        if missing:
+            raise RuntimeError("Modification payload missing fields: " + ", ".join(missing))
+
+        request_payload = dict(payload)
+        request_payload["dhanClientId"] = self.client_id
+        request_payload["orderId"] = str(order_id)
+
+        if str(request_payload["orderType"]).upper() not in ("STOP_LOSS", "STOP_LOSS_MARKET"):
+            raise RuntimeError("Only registered stop-loss orders may be modified by this engine.")
+
+        try:
+            quantity = int(request_payload["quantity"])
+        except (TypeError, ValueError):
+            raise RuntimeError("Modified order quantity must be a positive integer.")
+        if isinstance(request_payload["quantity"], bool) or quantity <= 0 or quantity != request_payload["quantity"]:
+            raise RuntimeError("Modified order quantity must be a positive integer.")
+
+        if str(request_payload["validity"]).upper() != "DAY":
+            raise RuntimeError("Only DAY validity is supported for SL modification.")
+
+        if float(request_payload["price"]) != 0 or float(request_payload["triggerPrice"]) <= 0:
+            raise RuntimeError("Invalid STOP_LOSS_MARKET modification prices.")
+
+        return self._request(
+            "/orders/" + str(order_id),
+            method="PUT",
+            payload=request_payload,
+            allow_write=True,
         )
 
     # ======================================================
