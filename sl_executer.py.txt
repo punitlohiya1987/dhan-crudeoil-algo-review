@@ -21,7 +21,9 @@ from datetime import datetime
 import config
 
 
-LIVE_SL_MODIFICATION_RELEASED = (\n    getattr(config, "LIVE_SL_MODIFICATION_RELEASED", False) is True\n)
+LIVE_SL_MODIFICATION_RELEASED = (
+    getattr(config, "LIVE_SL_MODIFICATION_RELEASED", False) is True
+)
 MAX_MODIFICATIONS_PER_ORDER = 25
 
 
