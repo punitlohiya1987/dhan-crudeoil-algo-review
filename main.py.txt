@@ -900,7 +900,38 @@ class CrudeOilMainEngine:
         return True
 
     # ======================================================
-    # ONE READ-ONLY CYCLE
+    # CLOSED-CYCLE PENDING ENTRY SAFETY
+    # ======================================================
+
+    def assert_no_entry_after_cycle_close(self):
+        strategy = self.state.get("strategy", {})
+        if strategy.get("cycle_closed") is not True:
+            return True
+
+        group = self.state.get("orders", {}).get("pending_entry_orders", {})
+        working = []
+        for correlation_id, record in group.items():
+            if not isinstance(record, dict):
+                raise RuntimeError("Invalid saved entry order record.")
+            status = str(record.get("status", "")).upper()
+            if status in ("PENDING", "TRANSIT", "PART_TRADED", "OPEN"):
+                working.append({
+                    "correlation_id": str(correlation_id),
+                    "order_id": str(record.get("order_id") or ""),
+                    "status": status,
+                })
+
+        if working:
+            raise RuntimeError(
+                "Cycle is closed but a resting grid LIMIT remains at Dhan: "
+                + str(working)
+                + ". Automatic cancellation is disabled. Manually cancel "
+                "the broker order before authorizing another execution."
+            )
+        return True
+
+    # ======================================================
+    # ONE GUARDED MONITORING / ORCHESTRATION CYCLE
     # ======================================================
 
     def run_once(self):
@@ -910,6 +941,11 @@ class CrudeOilMainEngine:
         self._validate_active_contract()
 
         self.reconcile_orders()
+
+        # A filled SL closes the registered cycle. If a later grid LIMIT
+        # is still resting, stop and require operator cancellation rather
+        # than leave a post-stop entry armed.
+        self.assert_no_entry_after_cycle_close()
 
         # Read positions only.
         # Existing positions are never auto-enrolled.
