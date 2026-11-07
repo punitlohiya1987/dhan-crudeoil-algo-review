@@ -31,6 +31,7 @@ from fill_tracker import FillTracker
 from order_monitor import OrderMonitor
 from sl_controller import StopLossController
 from order_manager import OrderManager
+from sl_executer import StopLossExecutor
 
 
 # ==========================================================
@@ -69,6 +70,7 @@ class CrudeOilMainEngine:
         self.sl_controller = None
         self.execution_guard = None
         self.order_manager = None
+        self.sl_executor = None
 
     # ======================================================
     # LOGGING
@@ -132,6 +134,12 @@ class CrudeOilMainEngine:
         )
 
         self.order_manager = OrderManager(
+            self.client,
+            self.state_store,
+            self.state,
+        )
+
+        self.sl_executor = StopLossExecutor(
             self.client,
             self.state_store,
             self.state,
@@ -237,6 +245,154 @@ class CrudeOilMainEngine:
         )
 
         return result
+
+    # ======================================================
+    # COMMON SL PROTECTION ORCHESTRATION
+    # ======================================================
+
+    def ensure_stop_loss_protection(self):
+        """
+        Reconcile each product bucket against the registered SL order.
+        Missing SLs are submitted only through OrderManager's write-ahead
+        and release gates. Existing SLs are modified in place only through
+        StopLossExecutor's strict release gates. Never cancel/replace.
+        """
+        if not self.order_manager or not self.sl_executor:
+            raise RuntimeError("Order and SL execution components are not initialized.")
+
+        positions = self.state.get("positions", {})
+        quantities = {
+            "MARGIN": int(positions.get("margin_quantity", 0) or 0),
+            "INTRADAY": int(positions.get("intraday_quantity", 0) or 0),
+        }
+        total = quantities["MARGIN"] + quantities["INTRADAY"]
+
+        if total == 0:
+            return {"status": "NO_OPEN_POSITION", "actions": []}
+
+        trigger = self.state.get("prices", {}).get("common_stop_loss")
+        if trigger is None:
+            raise RuntimeError("Open exposure has no persisted common SL trigger.")
+        trigger = float(trigger)
+        if trigger <= 0:
+            raise RuntimeError("Persisted common SL trigger is invalid.")
+
+        broker_orders = self.order_monitor._extract_orders(
+            self.client.get_orders()
+        )
+        active_contract_orders = [
+            order for order in broker_orders
+            if self.order_monitor._is_active_contract_order(order)
+        ]
+
+        registered_group = self.state.get("orders", {}).get("stop_loss_orders", {})
+        actions = []
+        sequence = int(
+            self.state.get("strategy", {}).get("last_entry_sequence")
+            or self.state.get("strategy", {}).get("entry_count")
+            or 1
+        )
+
+        for product_type, open_quantity in quantities.items():
+            if open_quantity == 0:
+                continue
+
+            registered = [
+                (key, record)
+                for key, record in registered_group.items()
+                if str(record.get("product_type", "")).upper() == product_type
+                and str(record.get("status", "")).upper()
+                    in self.order_manager.ACTIVE_STATUSES
+            ]
+
+            if len(registered) > 1:
+                raise RuntimeError(
+                    "Multiple active registered SL intents exist for " + product_type
+                )
+
+            if not registered:
+                # The order manager writes the intent to state before
+                # any broker request. All live and durable-state gates
+                # remain authoritative inside OrderManager and DhanClient.
+                result = self.order_manager.submit_stop_loss(
+                    sequence=sequence,
+                    quantity=open_quantity,
+                    trigger_price=trigger,
+                    product_type=product_type,
+                )
+                actions.append({
+                    "product_type": product_type,
+                    "action": "SL_SUBMISSION_RECORDED",
+                    "result": result,
+                })
+                continue
+
+            key, saved = registered[0]
+            correlation_id = str(
+                saved.get("correlationId")
+                or saved.get("correlation_id")
+                or ""
+            )
+            if not correlation_id:
+                raise RuntimeError("Registered SL has no correlation ID: " + str(key))
+
+            matches = [
+                order for order in active_contract_orders
+                if str(
+                    order.get("correlationId")
+                    or order.get("correlation_id")
+                    or ""
+                ) == correlation_id
+            ]
+            if len(matches) != 1:
+                raise RuntimeError(
+                    "Registered active SL must match exactly one broker order for "
+                    + product_type
+                )
+
+            broker_order = matches[0]
+            broker_quantity = int(broker_order.get("quantity", 0))
+            broker_filled = int(
+                broker_order.get("filledQty")
+                if broker_order.get("filledQty") is not None
+                else broker_order.get("filledQuantity", 0)
+            )
+            broker_remaining = broker_quantity - broker_filled
+            broker_trigger = float(broker_order.get("triggerPrice", 0) or 0)
+
+            if broker_remaining == open_quantity and broker_trigger == trigger:
+                actions.append({
+                    "product_type": product_type,
+                    "action": "EXISTING_SL_ALREADY_MATCHES",
+                    "order_id": str(broker_order.get("orderId") or ""),
+                })
+                continue
+
+            # A trigger may only tighten. Equal trigger is permitted by
+            # the executor only when quantity must be increased after a
+            # new partial/complete entry fill; the executor still blocks
+            # every broker modification until its hard release is enabled.
+            desired = {
+                "required": True,
+                "confirmed": False,
+                "quantity": open_quantity,
+                "trigger_price": trigger,
+            }
+            result = self.sl_executor.modify_existing_sl(
+                broker_order,
+                desired,
+            )
+            actions.append({
+                "product_type": product_type,
+                "action": "SL_MODIFICATION_RECORDED",
+                "result": result,
+            })
+
+        return {
+            "status": "PROTECTION_ACTIONS_RECONCILED",
+            "actions": actions,
+            "registered_open_quantity": total,
+        }
 
     # ======================================================
     # STOP LOSS ASSESSMENT
@@ -619,6 +775,8 @@ class CrudeOilMainEngine:
 
         # Response receipt alone is not reconciliation.
         self.reconcile_positions(positions)
+
+        self.ensure_stop_loss_protection()
 
         self.assess_stop_loss()
 
