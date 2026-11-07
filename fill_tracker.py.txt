@@ -517,6 +517,16 @@ class FillTracker:
         cumulative_average,
     ):
 
+        strategy_state = self.state.get("strategy", {})
+        if (
+            strategy_state.get("cycle_active") is not True
+            or strategy_state.get("cycle_closed") is not False
+        ):
+            raise RuntimeError(
+                "Entry fill observed outside an active cycle. "
+                "The broker order must be reconciled manually; it will not be enrolled."
+            )
+
         orders = self.state["orders"]
 
         fill_totals = orders["order_fill_totals"]
