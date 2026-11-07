@@ -645,10 +645,17 @@ class OrderManager:
                 "Entry quantity does not match lot configuration."
             )
 
+        product_type = str(
+            getattr(config, "PRODUCT_TYPE", "INTRADAY")
+        ).upper()
+
+        if product_type not in ("MARGIN", "INTRADAY"):
+            raise RuntimeError("Configured product type must be MARGIN or INTRADAY.")
+
         payload = {
             "transactionType": direction,
             "exchangeSegment": str(config.EXCHANGE_SEGMENT),
-            "productType": "INTRADAY",
+            "productType": product_type,
             "orderType": "LIMIT",
             "validity": "DAY",
             "securityId": str(config.ACTIVE_SECURITY_ID),
@@ -672,6 +679,7 @@ class OrderManager:
         sequence,
         quantity,
         trigger_price,
+        product_type="INTRADAY",
     ):
 
         sequence = self._positive_integer(
@@ -706,17 +714,31 @@ class OrderManager:
                 "Invalid strategy direction."
             )
 
-        registered_quantity = self._integer_position_total()
+        product_type = str(product_type).upper()
+        if product_type not in ("MARGIN", "INTRADAY"):
+            raise RuntimeError("SL product type must be MARGIN or INTRADAY.")
+
+        positions = self.state.get("positions", {})
+        quantity_key = (
+            "margin_quantity"
+            if product_type == "MARGIN"
+            else "intraday_quantity"
+        )
+        registered_quantity = self._positive_integer(
+            positions.get(quantity_key, 0),
+            quantity_key,
+        ) if positions.get(quantity_key, 0) else 0
 
         if quantity != registered_quantity:
             raise RuntimeError(
-                "SL quantity must equal registered open quantity."
+                "SL quantity must equal registered open quantity for "
+                + product_type + "."
             )
 
         payload = {
             "transactionType": exit_direction,
             "exchangeSegment": str(config.EXCHANGE_SEGMENT),
-            "productType": "INTRADAY",
+            "productType": product_type,
             "orderType": "STOP_LOSS_MARKET",
             "validity": "DAY",
             "securityId": str(config.ACTIVE_SECURITY_ID),
