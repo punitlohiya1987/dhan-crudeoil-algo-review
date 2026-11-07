@@ -664,6 +664,7 @@ class FillTracker:
     def _apply_exit_fill(
         self,
         correlation_id,
+        saved_record,
         cumulative_quantity,
         cumulative_average,
     ):
@@ -705,7 +706,10 @@ class FillTracker:
             "registered_positions"
         ]
 
-        # Validate the full exit delta before mutating any position record.
+        exit_product_type = self._product_type(saved_record)
+
+        # An SL order is tied to one Dhan product bucket. Never allocate
+        # its fills against positions held under the other product type.
         # A broker overfill or inconsistent cumulative update must fail
         # atomically rather than partially closing the local ledger.
         total_open_quantity = 0
@@ -726,12 +730,21 @@ class FillTracker:
                 raise RuntimeError(
                     "Position closed quantity exceeds filled quantity."
                 )
-            total_open_quantity += filled - closed
+            position_product = str(
+                position.get("product_type", "")
+            ).upper()
+            if position_product not in ("MARGIN", "INTRADAY"):
+                raise RuntimeError(
+                    "Registered position has an invalid product type."
+                )
+            if position_product == exit_product_type:
+                total_open_quantity += filled - closed
 
         if delta > total_open_quantity:
             raise RuntimeError(
-                "Exit fill exceeds registered open position quantity. "
-                "No local positions were changed."
+                "Exit fill exceeds registered open quantity for "
+                + exit_product_type
+                + ". No local positions were changed."
             )
 
         remaining_exit_quantity = delta
@@ -751,6 +764,13 @@ class FillTracker:
             )
 
             open_quantity = filled - closed
+
+            position_product = str(
+                position.get("product_type", "")
+            ).upper()
+
+            if position_product != exit_product_type:
+                continue
 
             if open_quantity <= 0:
                 continue
@@ -879,6 +899,7 @@ class FillTracker:
 
             changed = self._apply_exit_fill(
                 correlation_id,
+                saved_record,
                 cumulative_quantity,
                 cumulative_average,
             )
