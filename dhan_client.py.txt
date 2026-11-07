@@ -116,6 +116,17 @@ class DhanClient:
                     "Broker write blocked by order placement switch."
                 )
 
+            if getattr(config, "LIVE_ENGINE_RELEASED", False) is not True:
+                raise RuntimeError(
+                    "Broker write blocked: live engine release is not approved."
+                )
+
+            if getattr(config, "REQUIRE_DURABLE_STATE", True) is True:
+                if getattr(config, "DURABLE_STATE_VERIFIED", False) is not True:
+                    raise RuntimeError(
+                        "Broker write blocked: durable state is not verified."
+                    )
+
         url = BASE_URL + endpoint
 
         headers = {
