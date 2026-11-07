@@ -38,6 +38,13 @@ class OrderManager:
         "VERIFICATION_REQUIRED",
     }
 
+    TERMINAL_STATUSES = {
+        "TRADED",
+        "CANCELLED",
+        "REJECTED",
+        "EXPIRED",
+    }
+
     def __init__(
         self,
         client,
@@ -187,7 +194,7 @@ class OrderManager:
     # CORRELATION ID
     # ======================================================
 
-    def _correlation_id(self, role, sequence):
+    def _correlation_id(self, role, sequence, product_type):
 
         execution_id = self._validate_cycle()
 
@@ -195,6 +202,8 @@ class OrderManager:
             str(execution_id)
             + "|"
             + str(role)
+            + "|"
+            + str(product_type).upper()
             + "|"
             + str(sequence)
         )
@@ -237,7 +246,7 @@ class OrderManager:
 
         return None, None
 
-    def _has_unresolved_intent(self, group):
+    def _has_open_intent(self, group, role, product_type):
 
         for record in group.values():
 
@@ -246,11 +255,26 @@ class OrderManager:
                     "Invalid saved order intent."
                 )
 
-            status = str(
-                record.get("status", "")
+            saved_role = str(record.get("role", "")).upper()
+            saved_product = str(
+                record.get("product_type")
+                or record.get("payload", {}).get("productType")
+                or ""
             ).upper()
 
-            if status in self.UNRESOLVED_STATUSES:
+            if role == "ENTRY":
+                same_scope = saved_role == "ENTRY"
+            else:
+                same_scope = (
+                    saved_role == "STOP_LOSS"
+                    and saved_product == str(product_type).upper()
+                )
+
+            if not same_scope:
+                continue
+
+            status = str(record.get("status", "")).upper()
+            if status not in self.TERMINAL_STATUSES:
                 return True
 
         return False
@@ -312,10 +336,16 @@ class OrderManager:
                 + str(correlation_id)
             )
 
-        if self._has_unresolved_intent(group):
+        product_type = str(
+            payload.get("productType", "")
+        ).upper()
+
+        if self._has_open_intent(group, role, product_type):
+            scope = "entry" if role == "ENTRY" else product_type + " stop-loss"
             raise RuntimeError(
-                "Another unresolved order intent exists in "
-                + group_name
+                "An existing non-terminal order already occupies this "
+                + scope
+                + " scope. Duplicate submission is prohibited."
             )
 
         active = self.state["active_contract"]
@@ -421,12 +451,22 @@ class OrderManager:
                     "Durable state is not verified. Broker order submission blocked."
                 )
 
+        payload = dict(payload)
+
+        product_type = str(
+            payload.get("productType", "")
+        ).upper()
+
+        if product_type not in ("MARGIN", "INTRADAY"):
+            raise RuntimeError(
+                "Order product type must be MARGIN or INTRADAY."
+            )
+
         correlation_id = self._correlation_id(
             role,
             sequence,
+            product_type,
         )
-
-        payload = dict(payload)
 
         payload["correlationId"] = correlation_id
         payload["dhanClientId"] = str(
