@@ -611,22 +611,47 @@ class StopLossExecutor:
             )
 
         quantity = data.get("quantity")
-
         trigger = data.get("triggerPrice")
+        status = str(
+            data.get("orderStatus")
+            or data.get("status")
+            or ""
+        ).upper()
 
-        if quantity is not None:
+        if quantity is None or trigger is None:
+            raise RuntimeError(
+                "Broker verification omitted modified quantity or trigger price."
+            )
 
-            if int(quantity) != int(request["quantity"]):
-                raise RuntimeError(
-                    "Modified SL quantity verification failed."
-                )
+        if status not in self.ACTIVE_STATUSES:
+            raise RuntimeError(
+                "Modified SL is not in a working broker status."
+            )
 
-        if trigger is not None:
+        if int(quantity) != int(request["quantity"]):
+            raise RuntimeError(
+                "Modified SL quantity verification failed."
+            )
 
-            if float(trigger) != float(request["triggerPrice"]):
-                raise RuntimeError(
-                    "Modified SL trigger verification failed."
-                )
+        if float(trigger) != float(request["triggerPrice"]):
+            raise RuntimeError(
+                "Modified SL trigger verification failed."
+            )
+
+        verified_order_id = str(
+            data.get("orderId")
+            or data.get("order_id")
+            or ""
+        )
+        expected_order_id = str(
+            original.get("orderId")
+            or original.get("order_id")
+            or ""
+        )
+        if verified_order_id != expected_order_id:
+            raise RuntimeError(
+                "Broker verification order ID is missing or mismatched."
+            )
 
         return True
 
