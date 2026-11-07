@@ -455,8 +455,10 @@ class CrudeOilMainEngine:
         for record in entry_group.values():
             if not isinstance(record, dict):
                 raise RuntimeError("Invalid saved entry order record.")
-            if str(record.get("status", "")).upper() in self.order_manager.ACTIVE_STATUSES:
-                raise RuntimeError("Another entry order is still active; overlap is prohibited.")
+            if str(record.get("status", "")).upper() in (
+                "PENDING", "TRANSIT", "PART_TRADED", "OPEN"
+            ):
+                raise RuntimeError("Another entry order is still working; overlap is prohibited.")
 
         positions = self.state.get("positions", {})
         total_open = int(positions.get("total_quantity", 0) or 0)
