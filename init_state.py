@@ -3,6 +3,21 @@ import hashlib
 from datetime import datetime
 
 def generate_initial_state():
+    # Never overwrite an existing runtime ledger. Re-running this
+    # initializer must not erase an active cycle, broker order IDs,
+    # fills, or manual-cancellation locks.
+    try:
+        with open("state.json", "r", encoding="utf-8") as existing_file:
+            existing_file.read(1)
+    except FileNotFoundError:
+        pass
+    else:
+        raise RuntimeError(
+            "state.json already exists. Refusing to overwrite trading state. "
+            "Back up and review the existing state manually before any "
+            "deliberate reset."
+        )
+
     state = {
         "state_version": 5,
         "active_contract": {
