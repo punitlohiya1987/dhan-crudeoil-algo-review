@@ -22,17 +22,11 @@
 # ==========================================================
 # DHAN CREDENTIALS
 # ==========================================================
-# Read credentials from the existing Dhan CloudHQ Environment Variables.
+# Dhan Cloud global variables are injected using double-curly placeholders.
 # Keep actual credential values out of this source file and GitHub.
 
-import os
-
-try:
-    DHAN_CLIENT_ID = os.environ["DHAN_CLIENT_ID"].strip()
-    DHAN_ACCESS_TOKEN = os.environ["DHAN_ACCESS_TOKEN"].strip()
-except KeyError:
-    DHAN_CLIENT_ID = ""
-    DHAN_ACCESS_TOKEN = ""
+DHAN_CLIENT_ID = "{{DHAN_CLIENT_ID}}".strip()
+DHAN_ACCESS_TOKEN = "{{DHAN_ACCESS_TOKEN}}".strip()
 
 
 # ==========================================================
