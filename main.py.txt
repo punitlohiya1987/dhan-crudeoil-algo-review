@@ -220,7 +220,7 @@ class CrudeOilMainEngine:
             "%Y-%m-%d",
         ).date()
         days_to_expiry = (expiry - now.date()).days
-        rollover_days = int(getattr(config, "EXPIRY_ROLLOVER_DAYS", 0))
+        rollover_days = int(config.EXPIRY_ROLLOVER_DAYS)
         if days_to_expiry <= rollover_days:
             raise RuntimeError(
                 "New entry blocked: contract is within configured expiry-rollover window."
@@ -779,11 +779,11 @@ class CrudeOilMainEngine:
             raise RuntimeError("Entry start blocked by stop-loss cancellation lock.")
 
         release_checks = {
-            "TRADING_MODE": str(getattr(config, "TRADING_MODE", "")).upper() == "LIVE",
-            "LIVE_TRADING_ENABLED": getattr(config, "LIVE_TRADING_ENABLED", False) is True,
-            "ORDER_PLACEMENT_ENABLED": getattr(config, "ORDER_PLACEMENT_ENABLED", False) is True,
-            "LIVE_ENGINE_RELEASED": getattr(config, "LIVE_ENGINE_RELEASED", False) is True,
-            "DURABLE_STATE_VERIFIED": getattr(config, "DURABLE_STATE_VERIFIED", False) is True,
+            "TRADING_MODE": str(config.TRADING_MODE).upper() == "LIVE",
+            "LIVE_TRADING_ENABLED": config.LIVE_TRADING_ENABLED is True,
+            "ORDER_PLACEMENT_ENABLED": config.ORDER_PLACEMENT_ENABLED is True,
+            "LIVE_ENGINE_RELEASED": config.LIVE_ENGINE_RELEASED is True,
+            "DURABLE_STATE_VERIFIED": config.DURABLE_STATE_VERIFIED is True,
         }
         failed = [name for name, passed in release_checks.items() if not passed]
         if failed:
@@ -824,7 +824,7 @@ class CrudeOilMainEngine:
         # the first cycle. OrderManager.calculate_first_cycle() reads
         # direction/grid/SL distance from this state; calculating first
         # against a fresh state would otherwise fail on blank defaults.
-        strategy["direction"] = str(getattr(config, "DIRECTION", "")).upper()
+        strategy["direction"] = str(config.DIRECTION).upper()
         strategy["grid_points"] = int(config.GRID_POINTS)
         strategy["stop_loss_points"] = int(config.STOP_LOSS_POINTS)
         strategy["maximum_entries"] = int(config.MAX_ENTRIES)
