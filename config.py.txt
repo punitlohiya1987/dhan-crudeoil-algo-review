@@ -1,4 +1,3 @@
-
 # ==========================================================
 # DHAN CRUDEOILM - CENTRAL CONFIGURATION
 # VERSION 5.1 - CLOUDHQ SAFE CONFIG
@@ -22,29 +21,11 @@
 # ==========================================================
 # DHAN CREDENTIALS
 # ==========================================================
-# Dhan Cloud credentials:
-# 1) Prefer the project's secure Environment Variables.
-# 2) Fall back to Dhan Cloud Global Variable placeholders.
-# Never hardcode credential values in this source file or GitHub.
+# Dhan Cloud Global Variables must be assigned directly in this form.
+# Do not replace these placeholders with real credential values.
 
-from os import environ as _cloud_environment
-
-
-def _read_cloud_credential(environment_name, global_placeholder):
-    value = _cloud_environment.get(environment_name, "")
-    if not value:
-        value = global_placeholder
-    return str(value or "").strip()
-
-
-DHAN_CLIENT_ID = _read_cloud_credential(
-    "DHAN_CLIENT_ID",
-    "{{CLIENT_ID}}",
-)
-DHAN_ACCESS_TOKEN = _read_cloud_credential(
-    "DHAN_ACCESS_TOKEN",
-    "{{ACCESS_TOKEN}}",
-)
+DHAN_CLIENT_ID = "{{CLIENT_ID}}"
+DHAN_ACCESS_TOKEN = "{{ACCESS_TOKEN}}"
 
 
 # ==========================================================
