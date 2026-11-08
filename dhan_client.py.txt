@@ -53,6 +53,34 @@ class DhanClient:
             config.TRADING_MODE
         ).upper()
 
+        # Secret-safe diagnostic: compare the values seen here with main.py.
+        # Credential contents are never printed.
+        client_id_status = (
+            "EMPTY" if not self.client_id
+            else "UNRESOLVED_PLACEHOLDER"
+            if self.client_id.startswith("{{")
+            and self.client_id.endswith("}}")
+            else "VALUE_PRESENT"
+        )
+        access_token_status = (
+            "EMPTY" if not self.access_token
+            else "UNRESOLVED_PLACEHOLDER"
+            if self.access_token.startswith("{{")
+            and self.access_token.endswith("}}")
+            else "VALUE_PRESENT"
+        )
+        print(
+            "DhanClient credential preflight (values hidden): "
+            + "config_source=" + str(config.__file__)
+            + "; client_id=" + client_id_status
+            + "; access_token=" + access_token_status
+            + "; client_id_empty=" + str(not self.client_id)
+            + "; client_id_exact_placeholder=" + str(self.client_id == "{{CLIENT_ID}}")
+            + "; access_token_empty=" + str(not self.access_token)
+            + "; access_token_exact_placeholder=" + str(self.access_token == "{{ACCESS_TOKEN}}"),
+            flush=True,
+        )
+
         if (
             not self.client_id
             or not self.access_token
