@@ -439,13 +439,13 @@ class OrderManager:
                 "Broker order submission blocked."
             )
 
-        if getattr(config, "LIVE_ENGINE_RELEASED", False) is not True:
+        if config.LIVE_ENGINE_RELEASED is not True:
             raise RuntimeError(
                 "LIVE_ENGINE_RELEASED is OFF. Broker order submission blocked."
             )
 
-        if getattr(config, "REQUIRE_DURABLE_STATE", True) is True:
-            if getattr(config, "DURABLE_STATE_VERIFIED", False) is not True:
+        if config.REQUIRE_DURABLE_STATE is True:
+            if config.DURABLE_STATE_VERIFIED is not True:
                 raise RuntimeError(
                     "Durable state is not verified. Broker order submission blocked."
                 )
@@ -712,7 +712,7 @@ class OrderManager:
             )
 
         product_type = str(
-            getattr(config, "PRODUCT_TYPE", "INTRADAY")
+            config.PRODUCT_TYPE
         ).upper()
 
         if product_type not in ("MARGIN", "INTRADAY"):
