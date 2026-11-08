@@ -108,6 +108,36 @@ class CrudeOilMainEngine:
                 "State file did not return a valid state."
             )
 
+        # Credential preflight diagnostic.
+        # Never print or persist credential values.
+        configured_client_id = str(
+            config.DHAN_CLIENT_ID or ""
+        ).strip()
+        configured_access_token = str(
+            config.DHAN_ACCESS_TOKEN or ""
+        ).strip()
+
+        client_id_status = (
+            "EMPTY" if not configured_client_id
+            else "UNRESOLVED_PLACEHOLDER"
+            if configured_client_id.startswith("{{")
+            and configured_client_id.endswith("}}")
+            else "VALUE_PRESENT"
+        )
+        access_token_status = (
+            "EMPTY" if not configured_access_token
+            else "UNRESOLVED_PLACEHOLDER"
+            if configured_access_token.startswith("{{")
+            and configured_access_token.endswith("}}")
+            else "VALUE_PRESENT"
+        )
+
+        self.log(
+            "Credential preflight (values hidden): "
+            "config.DHAN_CLIENT_ID=" + client_id_status
+            + "; config.DHAN_ACCESS_TOKEN=" + access_token_status
+        )
+
         self.client = DhanClient()
 
         self.fill_tracker = FillTracker(
