@@ -140,6 +140,16 @@ class CrudeOilMainEngine:
 
         self.client = DhanClient()
 
+        # TEMPORARY SAFETY STOP: verify credential injection only.
+        # Do not start monitoring, poll broker APIs, or touch order workflows.
+        self.log(
+            "Credential diagnostic completed; monitoring intentionally not started."
+        )
+        raise RuntimeError(
+            "CREDENTIAL_DIAGNOSTIC_ONLY: remove this temporary stop only after "
+            "credential loading has been verified."
+        )
+
         self.fill_tracker = FillTracker(
             self.state_store,
             self.state,
