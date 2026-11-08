@@ -53,10 +53,15 @@ class DhanClient:
             config.TRADING_MODE
         ).upper()
 
-        if not self.client_id or not self.access_token:
+        if (
+            not self.client_id
+            or not self.access_token
+            or self.client_id == "{{CLIENT_ID}}"
+            or self.access_token == "{{ACCESS_TOKEN}}"
+        ):
             raise RuntimeError(
-                "Dhan credentials missing. "
-                "CloudHQ secure configuration check karein."
+                "Dhan Cloud Global Variables were not substituted. "
+                "Check the Dhan account connection and Global Variables."
             )
 
     # ======================================================
