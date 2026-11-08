@@ -116,13 +116,13 @@ class DhanClient:
                     "Broker write blocked by order placement switch."
                 )
 
-            if getattr(config, "LIVE_ENGINE_RELEASED", False) is not True:
+            if config.LIVE_ENGINE_RELEASED is not True:
                 raise RuntimeError(
                     "Broker write blocked: live engine release is not approved."
                 )
 
-            if getattr(config, "REQUIRE_DURABLE_STATE", True) is True:
-                if getattr(config, "DURABLE_STATE_VERIFIED", False) is not True:
+            if config.REQUIRE_DURABLE_STATE is True:
+                if config.DURABLE_STATE_VERIFIED is not True:
                     raise RuntimeError(
                         "Broker write blocked: durable state is not verified."
                     )
@@ -519,10 +519,10 @@ class DhanClient:
         if not order_id or not isinstance(payload, dict):
             raise RuntimeError("A broker order ID and modification payload are required.")
 
-        if getattr(config, "SL_MODIFICATION_ENABLED", False) is not True:
+        if config.SL_MODIFICATION_ENABLED is not True:
             raise RuntimeError("SL_MODIFICATION_ENABLED is OFF; modification blocked.")
 
-        if getattr(config, "LIVE_SL_MODIFICATION_RELEASED", False) is not True:
+        if config.LIVE_SL_MODIFICATION_RELEASED is not True:
             raise RuntimeError("LIVE_SL_MODIFICATION_RELEASED is OFF; modification blocked.")
 
         required = ("orderType", "quantity", "price", "triggerPrice", "validity")
