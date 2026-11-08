@@ -25,8 +25,8 @@
 # Dhan Cloud global variables are injected using double-curly placeholders.
 # Keep actual credential values out of this source file and GitHub.
 
-DHAN_CLIENT_ID = "{{DHAN_CLIENT_ID}}".strip()
-DHAN_ACCESS_TOKEN = "{{DHAN_ACCESS_TOKEN}}".strip()
+DHAN_CLIENT_ID = "{{CLIENT_ID}}".strip()
+DHAN_ACCESS_TOKEN = "{{ACCESS_TOKEN}}".strip()
 
 
 # ==========================================================
