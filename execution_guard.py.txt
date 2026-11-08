@@ -59,7 +59,11 @@ class ExecutionGuard:
             return True
         if isinstance(self.config, dict):
             return self.config.get(actual_key, default)
-        return getattr(self.config, actual_key, default)
+        try:
+            config_values = vars(self.config)
+        except TypeError:
+            return default
+        return config_values.get(actual_key, default)
 
     # ======================================================
     # RESULT
