@@ -22,11 +22,29 @@
 # ==========================================================
 # DHAN CREDENTIALS
 # ==========================================================
-# Dhan Cloud global variables are injected using double-curly placeholders.
-# Keep actual credential values out of this source file and GitHub.
+# Dhan Cloud credentials:
+# 1) Prefer the project's secure Environment Variables.
+# 2) Fall back to Dhan Cloud Global Variable placeholders.
+# Never hardcode credential values in this source file or GitHub.
 
-DHAN_CLIENT_ID = "{{CLIENT_ID}}".strip()
-DHAN_ACCESS_TOKEN = "{{ACCESS_TOKEN}}".strip()
+from os import environ as _cloud_environment
+
+
+def _read_cloud_credential(environment_name, global_placeholder):
+    value = _cloud_environment.get(environment_name, "")
+    if not value:
+        value = global_placeholder
+    return str(value or "").strip()
+
+
+DHAN_CLIENT_ID = _read_cloud_credential(
+    "DHAN_CLIENT_ID",
+    "{{CLIENT_ID}}",
+)
+DHAN_ACCESS_TOKEN = _read_cloud_credential(
+    "DHAN_ACCESS_TOKEN",
+    "{{ACCESS_TOKEN}}",
+)
 
 
 # ==========================================================
