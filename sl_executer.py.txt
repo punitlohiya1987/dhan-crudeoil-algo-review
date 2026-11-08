@@ -22,7 +22,7 @@ import config
 
 
 LIVE_SL_MODIFICATION_RELEASED = (
-    getattr(config, "LIVE_SL_MODIFICATION_RELEASED", False) is True
+    config.LIVE_SL_MODIFICATION_RELEASED is True
 )
 MAX_MODIFICATIONS_PER_ORDER = 25
 
