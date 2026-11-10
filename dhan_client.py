@@ -1,0 +1,617 @@
+
+# ==========================================================
+# DHAN CRUDEOILM - DHAN API CLIENT
+# VERSION 5.1 - CLOUDHQ SECURITY COMPATIBLE
+#
+# DHAN HQ API V2
+# READ-ONLY MARKET / ACCOUNT DATA
+# ORDER BOOK / TRADE BOOK / POSITIONS
+# ORDER LOOKUP BY ID / CORRELATION ID
+# LIVE LTP MARKETFEED
+#
+# ORDER WRITE METHODS SAFETY LOCKED
+# NO AUTOMATIC RETRY
+# NO HIDDEN ORDER SUBMISSION
+# ==========================================================
+
+import json
+import urllib.request
+import urllib.error
+
+import config
+
+
+BASE_URL = "https://api.dhan.co/v2"
+REQUEST_TIMEOUT = 20
+
+
+class DhanClient:
+
+    def __init__(self):
+
+        self.client_id = str(
+            config.DHAN_CLIENT_ID or ""
+        ).strip()
+
+        self.access_token = str(
+            config.DHAN_ACCESS_TOKEN or ""
+        ).strip()
+
+        self.order_placement_enabled = (
+            config.ORDER_PLACEMENT_ENABLED is True
+        )
+
+        self.position_conversion_enabled = (
+            config.POSITION_CONVERSION_ENABLED is True
+        )
+
+        self.live_trading_enabled = (
+            config.LIVE_TRADING_ENABLED is True
+        )
+
+        self.trading_mode = str(
+            config.TRADING_MODE
+        ).upper()
+
+        # Secret-safe diagnostic: compare the values seen here with main.py.
+        # Credential contents are never printed.
+        client_id_status = (
+            "EMPTY" if not self.client_id
+            else "UNRESOLVED_PLACEHOLDER"
+            if self.client_id.startswith("{{")
+            and self.client_id.endswith("}}")
+            else "VALUE_PRESENT"
+        )
+        access_token_status = (
+            "EMPTY" if not self.access_token
+            else "UNRESOLVED_PLACEHOLDER"
+            if self.access_token.startswith("{{")
+            and self.access_token.endswith("}}")
+            else "VALUE_PRESENT"
+        )
+        print(
+            "DhanClient credential preflight (values hidden): "
+            + "config_source=" + str(config.__file__)
+            + "; client_id=" + client_id_status
+            + "; access_token=" + access_token_status
+            + "; client_id_empty=" + str(not self.client_id)
+            + "; client_id_exact_placeholder=" + str(self.client_id == "{{CLIENT_ID}}")
+            + "; access_token_empty=" + str(not self.access_token)
+            + "; access_token_exact_placeholder=" + str(self.access_token == "{{ACCESS_TOKEN}}"),
+            flush=True,
+        )
+
+        if (
+            not self.client_id
+            or not self.access_token
+            or self.client_id == "{{CLIENT_ID}}"
+            or self.access_token == "{{ACCESS_TOKEN}}"
+        ):
+            raise RuntimeError(
+                "Dhan Cloud Global Variables were not substituted. "
+                "Check the Dhan account connection and Global Variables."
+            )
+
+    # ======================================================
+    # COMMON HTTP REQUEST
+    # ======================================================
+
+    def _request(
+        self,
+        endpoint,
+        method="GET",
+        payload=None,
+        allow_write=False,
+    ):
+
+        method = str(method).upper()
+
+        if not endpoint or not str(endpoint).startswith("/"):
+            raise RuntimeError(
+                "Invalid Dhan API endpoint."
+            )
+
+        if method not in ("GET", "POST", "PUT", "DELETE"):
+            raise RuntimeError(
+                "Unsupported HTTP method."
+            )
+
+        if method in ("PUT", "DELETE"):
+            if allow_write is not True:
+                raise RuntimeError(
+                    "Broker write request is blocked."
+                )
+
+        if method == "POST" and allow_write is not True:
+            if endpoint not in (
+                "/marketfeed/ltp",
+                "/marketfeed/ohlc",
+                "/marketfeed/quote",
+            ):
+                raise RuntimeError(
+                    "POST request is not an approved read operation."
+                )
+
+        if allow_write is True:
+
+            if self.trading_mode != "LIVE":
+                raise RuntimeError(
+                    "Broker write blocked: trading mode is not LIVE."
+                )
+
+            if self.live_trading_enabled is not True:
+                raise RuntimeError(
+                    "Broker write blocked: live trading is disabled."
+                )
+
+            if self.order_placement_enabled is not True:
+                raise RuntimeError(
+                    "Broker write blocked by order placement switch."
+                )
+
+            if config.LIVE_ENGINE_RELEASED is not True:
+                raise RuntimeError(
+                    "Broker write blocked: live engine release is not approved."
+                )
+
+            if config.REQUIRE_DURABLE_STATE is True:
+                if config.DURABLE_STATE_VERIFIED is not True:
+                    raise RuntimeError(
+                        "Broker write blocked: durable state is not verified."
+                    )
+
+        url = BASE_URL + endpoint
+
+        headers = {
+            "access-token": self.access_token,
+            "client-id": self.client_id,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+
+        body = None
+
+        if payload is not None:
+            body = json.dumps(
+                payload,
+                separators=(",", ":"),
+            ).encode("utf-8")
+
+        request = urllib.request.Request(
+            url=url,
+            data=body,
+            headers=headers,
+            method=method,
+        )
+
+        try:
+
+            with urllib.request.urlopen(
+                request,
+                timeout=REQUEST_TIMEOUT,
+            ) as response:
+
+                raw = response.read().decode("utf-8")
+
+                if not raw:
+                    return {}
+
+                try:
+                    return json.loads(raw)
+                except json.JSONDecodeError:
+                    raise RuntimeError(
+                        "Dhan API returned invalid JSON."
+                    )
+
+        except urllib.error.HTTPError as error:
+
+            try:
+                error_body = error.read().decode("utf-8")
+            except Exception:
+                error_body = ""
+
+            raise RuntimeError(
+                "Dhan HTTP error "
+                + str(error.code)
+                + ": "
+                + error_body[:1000]
+            )
+
+        except urllib.error.URLError as error:
+
+            raise RuntimeError(
+                "Dhan network error: "
+                + str(error.reason)
+            )
+
+        except TimeoutError:
+
+            raise RuntimeError(
+                "Dhan API request timed out. "
+                "Request was not automatically retried."
+            )
+
+    # ======================================================
+    # RESPONSE LIST NORMALIZATION
+    # ======================================================
+
+    def _extract_list(self, response, possible_keys):
+
+        if isinstance(response, list):
+            return response
+
+        if isinstance(response, str):
+
+            try:
+                response = json.loads(response)
+            except json.JSONDecodeError:
+                raise RuntimeError(
+                    "Dhan response string is invalid."
+                )
+
+        if not isinstance(response, dict):
+            raise RuntimeError(
+                "Unexpected Dhan response format."
+            )
+
+        for key in possible_keys:
+
+            value = response.get(key)
+
+            if isinstance(value, list):
+                return value
+
+        data = response.get("data")
+
+        if isinstance(data, list):
+            return data
+
+        if isinstance(data, dict):
+
+            for key in possible_keys:
+
+                value = data.get(key)
+
+                if isinstance(value, list):
+                    return value
+
+        raise RuntimeError(
+            "Expected list was not found in Dhan response."
+        )
+
+    # ======================================================
+    # POSITIONS
+    # ======================================================
+
+    def get_positions(self):
+
+        return self._request(
+            "/positions",
+            method="GET",
+        )
+
+    # ======================================================
+    # ORDER BOOK
+    # ======================================================
+
+    def get_orders(self):
+
+        response = self._request(
+            "/orders",
+            method="GET",
+        )
+
+        return self._extract_list(
+            response,
+            (
+                "data",
+                "orders",
+                "orderList",
+            ),
+        )
+
+    # ======================================================
+    # FUND LIMITS
+    # ======================================================
+
+    def get_fund_limits(self):
+
+        return self._request(
+            "/fundlimit",
+            method="GET",
+        )
+
+    # ======================================================
+    # TRADE HISTORY
+    # ======================================================
+
+    def get_trade_history(self):
+
+        return self._request(
+            "/trades",
+            method="GET",
+        )
+
+    # ======================================================
+    # HOLDINGS
+    # ======================================================
+
+    def get_holdings(self):
+
+        return self._request(
+            "/holdings",
+            method="GET",
+        )
+
+    # ======================================================
+    # ORDER LOOKUP BY ID
+    # ======================================================
+
+    def get_order_by_id(self, order_id):
+
+        if not order_id:
+            raise RuntimeError(
+                "Order ID is required."
+            )
+
+        return self._request(
+            "/orders/" + str(order_id),
+            method="GET",
+        )
+
+    # ======================================================
+    # ORDER LOOKUP BY CORRELATION ID
+    # ======================================================
+
+    def get_order_by_correlation(self, correlation_id):
+
+        if not correlation_id:
+            raise RuntimeError(
+                "Correlation ID is required."
+            )
+
+        orders = self.get_orders()
+        matches = []
+
+        for order in orders:
+
+            if not isinstance(order, dict):
+                continue
+
+            broker_correlation = str(
+                order.get("correlationId")
+                or order.get("correlation_id")
+                or ""
+            )
+
+            if broker_correlation == str(correlation_id):
+                matches.append(order)
+
+        if len(matches) > 1:
+            raise RuntimeError(
+                "Multiple broker orders share the same correlation ID."
+            )
+
+        if not matches:
+            return None
+
+        return matches[0]
+
+    # ======================================================
+    # LIVE MARKETFEED LTP
+    # ======================================================
+
+    def get_ltp(
+        self,
+        exchange_segment,
+        security_id,
+    ):
+
+        if not exchange_segment or not security_id:
+            raise RuntimeError(
+                "Exchange segment and security ID are required."
+            )
+
+        payload = {
+            str(exchange_segment): [
+                str(security_id)
+            ]
+        }
+
+        response = self._request(
+            "/marketfeed/ltp",
+            method="POST",
+            payload=payload,
+            allow_write=False,
+        )
+
+        if not isinstance(response, dict):
+            raise RuntimeError(
+                "Invalid Dhan LTP response."
+            )
+
+        data = response.get("data", {})
+
+        if not isinstance(data, dict):
+            raise RuntimeError(
+                "Dhan LTP data is missing."
+            )
+
+        segment_data = data.get(
+            str(exchange_segment),
+            {},
+        )
+
+        if not isinstance(segment_data, dict):
+            raise RuntimeError(
+                "Dhan LTP segment response is invalid."
+            )
+
+        instrument_data = segment_data.get(
+            str(security_id)
+        )
+
+        if not isinstance(instrument_data, dict):
+            raise RuntimeError(
+                "Requested instrument LTP was not returned."
+            )
+
+        ltp = instrument_data.get("last_price")
+
+        if ltp is None:
+            ltp = instrument_data.get("ltp")
+
+        try:
+            ltp = float(ltp)
+        except (TypeError, ValueError):
+            raise RuntimeError(
+                "Dhan returned invalid LTP."
+            )
+
+        if ltp <= 0:
+            raise RuntimeError(
+                "Dhan returned non-positive LTP."
+            )
+
+        return ltp
+
+    # ======================================================
+    # ORDER PLACEMENT - STRICTLY GATED
+    # ======================================================
+
+    def place_order(self, payload):
+        """Submit only approved LIMIT entries or protective SL-M orders."""
+        if not isinstance(payload, dict):
+            raise RuntimeError("Order payload must be a dictionary.")
+
+        required = (
+            "dhanClientId", "correlationId", "transactionType",
+            "exchangeSegment", "productType", "orderType", "validity",
+            "securityId", "quantity", "price", "triggerPrice",
+        )
+        missing = [key for key in required if key not in payload]
+        if missing:
+            raise RuntimeError("Order payload missing fields: " + ", ".join(missing))
+
+        if str(payload["exchangeSegment"]) != str(config.EXCHANGE_SEGMENT):
+            raise RuntimeError("Order blocked: exchange segment mismatch.")
+        if str(payload["securityId"]) != str(config.SECURITY_ID):
+            raise RuntimeError("Order blocked: security ID mismatch.")
+        if str(payload["dhanClientId"]) != self.client_id:
+            raise RuntimeError("Order blocked: client ID mismatch.")
+
+        transaction = str(payload["transactionType"]).upper()
+        product = str(payload["productType"]).upper()
+        order_type = str(payload["orderType"]).upper()
+        validity = str(payload["validity"]).upper()
+
+        if transaction not in ("BUY", "SELL"):
+            raise RuntimeError("Invalid order transaction type.")
+        if product not in ("MARGIN", "INTRADAY"):
+            raise RuntimeError("Unsupported order product type.")
+        if validity != "DAY":
+            raise RuntimeError("Only DAY validity is allowed.")
+
+        try:
+            quantity = int(payload["quantity"])
+        except (TypeError, ValueError):
+            raise RuntimeError("Order quantity must be a positive integer.")
+        if isinstance(payload["quantity"], bool) or quantity <= 0 or quantity != payload["quantity"]:
+            raise RuntimeError("Order quantity must be a positive integer.")
+
+        if order_type == "LIMIT":
+            if config.ALLOW_LIMIT_ENTRY is not True:
+                raise RuntimeError("Limit entry order type is disabled.")
+            if float(payload["price"]) <= 0 or float(payload["triggerPrice"]) != 0:
+                raise RuntimeError("Invalid LIMIT order price fields.")
+        elif order_type == "STOP_LOSS_MARKET":
+            if config.ALLOW_STOP_LOSS_MARKET is not True:
+                raise RuntimeError("Stop-loss market order type is disabled.")
+            if float(payload["triggerPrice"]) <= 0 or float(payload["price"]) != 0:
+                raise RuntimeError("Invalid STOP_LOSS_MARKET price fields.")
+        else:
+            raise RuntimeError("Only LIMIT and STOP_LOSS_MARKET orders are permitted.")
+
+        return self._request(
+            "/orders",
+            method="POST",
+            payload=payload,
+            allow_write=True,
+        )
+
+    # ======================================================
+    # ORDER MODIFICATION - STRICTLY GATED
+    # ======================================================
+
+    def modify_order(self, order_id, payload):
+        """
+        Modify one existing pending order in place.
+        This route is retained for the SL executor only; all release
+        switches default OFF and no cancel/replace fallback exists.
+        """
+        if not order_id or not isinstance(payload, dict):
+            raise RuntimeError("A broker order ID and modification payload are required.")
+
+        if config.SL_MODIFICATION_ENABLED is not True:
+            raise RuntimeError("SL_MODIFICATION_ENABLED is OFF; modification blocked.")
+
+        if config.LIVE_SL_MODIFICATION_RELEASED is not True:
+            raise RuntimeError("LIVE_SL_MODIFICATION_RELEASED is OFF; modification blocked.")
+
+        required = ("orderType", "quantity", "price", "triggerPrice", "validity")
+        missing = [key for key in required if key not in payload]
+        if missing:
+            raise RuntimeError("Modification payload missing fields: " + ", ".join(missing))
+
+        request_payload = dict(payload)
+        request_payload["dhanClientId"] = self.client_id
+        request_payload["orderId"] = str(order_id)
+
+        if str(request_payload["orderType"]).upper() not in ("STOP_LOSS", "STOP_LOSS_MARKET"):
+            raise RuntimeError("Only registered stop-loss orders may be modified by this engine.")
+
+        try:
+            quantity = int(request_payload["quantity"])
+        except (TypeError, ValueError):
+            raise RuntimeError("Modified order quantity must be a positive integer.")
+        if isinstance(request_payload["quantity"], bool) or quantity <= 0 or quantity != request_payload["quantity"]:
+            raise RuntimeError("Modified order quantity must be a positive integer.")
+
+        if str(request_payload["validity"]).upper() != "DAY":
+            raise RuntimeError("Only DAY validity is supported for SL modification.")
+
+        if float(request_payload["price"]) != 0 or float(request_payload["triggerPrice"]) <= 0:
+            raise RuntimeError("Invalid STOP_LOSS_MARKET modification prices.")
+
+        return self._request(
+            "/orders/" + str(order_id),
+            method="PUT",
+            payload=request_payload,
+            allow_write=True,
+        )
+
+    # ======================================================
+    # ORDER CANCELLATION - LOCKED
+    # ======================================================
+
+    def cancel_order(self, order_id):
+
+        raise RuntimeError(
+            "Order cancellation is locked in this build. "
+            "No broker cancellation was submitted."
+        )
+
+    # ======================================================
+    # POSITION CONVERSION - LOCKED
+    # ======================================================
+
+    def convert_position(self, payload):
+
+        if self.position_conversion_enabled is not True:
+            raise RuntimeError(
+                "Position conversion is disabled."
+            )
+
+        raise RuntimeError(
+            "Position conversion is not released in this build."
+        )
