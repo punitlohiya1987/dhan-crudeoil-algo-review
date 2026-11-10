@@ -25,34 +25,27 @@ from zoneinfo import ZoneInfo
 
 import config
 
-# Dhan Cloud Global Variables are injected into the strategy entry-point.
-# Keep these references in main.py (the configured entry point), then pass
-# them to the shared config module. Never log credential contents.
-def _resolved_dhan_global(candidates):
-    for candidate in candidates:
-        value = str(candidate or "").strip()
-        if value and not (
-            value.startswith("{{") and value.endswith("}}")
-        ):
-            return value
-    return ""
+# Dhan Cloud's documented Global Variables syntax.
+# Keep each placeholder as a direct module-level assignment in the
+# configured entry-point file (main.py), exactly as Dhan documents.
+# Never print, log, or persist either credential.
+client_id = "{{CLIENT_ID}}"
+access_token = "{{ACCESS_TOKEN}}"
 
+# Pass resolved values into the shared config module. If CloudHQ leaves
+# either placeholder unresolved, retain the existing fail-closed check
+# in DhanClient; do not fall back to a literal placeholder.
+if (
+    client_id
+    and not (client_id.startswith("{{") and client_id.endswith("}}"))
+):
+    config.DHAN_CLIENT_ID = client_id
 
-# Support both Dhan's documented standard names and the project-specific
-# names already used in this project. Keep environment values as fallback.
-_injected_client_id = _resolved_dhan_global((
-    "{{CLIENT_ID}}",
-    "{{DHAN_CLIENT_ID}}",
-))
-_injected_access_token = _resolved_dhan_global((
-    "{{ACCESS_TOKEN}}",
-    "{{DHAN_ACCESS_TOKEN}}",
-))
-
-if _injected_client_id:
-    config.DHAN_CLIENT_ID = _injected_client_id
-if _injected_access_token:
-    config.DHAN_ACCESS_TOKEN = _injected_access_token
+if (
+    access_token
+    and not (access_token.startswith("{{") and access_token.endswith("}}"))
+):
+    config.DHAN_ACCESS_TOKEN = access_token
 
 from dhan_client import DhanClient
 from state_store import StateStore
