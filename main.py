@@ -28,8 +28,8 @@ import config
 # Dhan Cloud Global Variables are injected into the strategy entry-point.
 # Keep these references in main.py (the configured entry point), then pass
 # them to the shared config module. Never log credential contents.
-config.DHAN_CLIENT_ID = "{{CLIENT_ID}}"
-config.DHAN_ACCESS_TOKEN = "{{ACCESS_TOKEN}}"
+config.DHAN_CLIENT_ID = "{{DHAN_CLIENT_ID}}"
+config.DHAN_ACCESS_TOKEN = "{{DHAN_ACCESS_TOKEN}}"
 
 from dhan_client import DhanClient
 from state_store import StateStore
