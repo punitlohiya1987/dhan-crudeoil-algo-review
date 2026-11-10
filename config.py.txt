@@ -21,11 +21,37 @@
 # ==========================================================
 # DHAN CREDENTIALS
 # ==========================================================
-# Dhan Cloud Global Variables must be assigned directly in this form.
-# Do not replace these placeholders with real credential values.
+# Diagnostic credential lookup.
+# Try both user-defined DHAN_* names and Dhan Cloud standard names.
+# Never print or store credential contents in logs.
 
-DHAN_CLIENT_ID = "{{CLIENT_ID}}"
-DHAN_ACCESS_TOKEN = "{{ACCESS_TOKEN}}"
+from os import environ as _cloud_environment
+
+
+def _read_cloud_credential(candidate_names):
+    for environment_name in candidate_names:
+        value = str(_cloud_environment.get(environment_name, "") or "").strip()
+        if value and not (
+            value.startswith("{{") and value.endswith("}}")
+        ):
+            return value, environment_name
+    return "", "NOT_FOUND"
+
+
+DHAN_CLIENT_ID, DHAN_CLIENT_ID_SOURCE = _read_cloud_credential(
+    ("DHAN_CLIENT_ID", "CLIENT_ID")
+)
+
+DHAN_ACCESS_TOKEN, DHAN_ACCESS_TOKEN_SOURCE = _read_cloud_credential(
+    ("DHAN_ACCESS_TOKEN", "ACCESS_TOKEN")
+)
+
+print(
+    "Dhan Cloud credential lookup (values hidden): "
+    + "client_id_source=" + DHAN_CLIENT_ID_SOURCE
+    + "; access_token_source=" + DHAN_ACCESS_TOKEN_SOURCE,
+    flush=True,
+)
 
 
 # ==========================================================
