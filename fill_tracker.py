@@ -1,0 +1,986 @@
+
+# ==========================================================
+# DHAN CRUDEOILM - FILL TRACKER
+# VERSION 4.0 - STATE STORE V5 COMPATIBLE
+#
+# CUMULATIVE FILL TRACKING
+# DUPLICATE FILL PROTECTION
+# INCREMENTAL AVERAGE PRICE CALCULATION
+# REGISTERED POSITION MANAGEMENT
+# FIFO EXIT ALLOCATION
+# COMMON SL QUANTITY RECALCULATION
+# COMMON SL TIGHTENING ONLY
+#
+# NO ORDER PLACEMENT
+# NO ORDER MODIFICATION
+# NO ORDER CANCELLATION
+# NO AUTOMATIC RETRY
+# ==========================================================
+
+from datetime import datetime
+
+
+class FillTracker:
+
+    ACTIVE_ENTRY_STATUSES = {
+        "PENDING",
+        "TRANSIT",
+        "PART_TRADED",
+        "OPEN",
+    }
+
+    TERMINAL_STATUSES = {
+        "TRADED",
+        "CANCELLED",
+        "REJECTED",
+        "EXPIRED",
+    }
+
+    def __init__(self, state_store, state):
+
+        self.state_store = state_store
+        self.state = state
+
+        if not isinstance(self.state, dict):
+            raise RuntimeError("FillTracker requires a valid state dictionary.")
+
+        self.state.setdefault("positions", {})
+        self.state.setdefault("prices", {})
+        self.state.setdefault("orders", {})
+
+        orders = self.state["orders"]
+
+        orders.setdefault("pending_entry_orders", {})
+        orders.setdefault("stop_loss_orders", {})
+        orders.setdefault("order_fill_totals", {})
+        orders.setdefault("manual_cancelled_orders", {})
+
+        self.state["positions"].setdefault(
+            "registered_positions",
+            {},
+        )
+
+    # ======================================================
+    # HELPERS
+    # ======================================================
+
+    def _now(self):
+
+        return datetime.now().isoformat()
+
+    def _integer(self, value, name):
+
+        if isinstance(value, bool):
+            raise RuntimeError(
+                "Invalid numeric field: " + name
+            )
+
+        try:
+            result = int(value)
+        except (TypeError, ValueError):
+            raise RuntimeError(
+                "Invalid numeric field: " + name
+            )
+
+        if result < 0 or result != value:
+            raise RuntimeError(
+                "Invalid numeric field: " + name
+            )
+
+        return result
+
+    def _price(self, value, name):
+
+        try:
+            result = float(value)
+        except (TypeError, ValueError):
+            raise RuntimeError(
+                "Invalid price field: " + name
+            )
+
+        if result <= 0:
+            raise RuntimeError(
+                "Invalid price field: " + name
+            )
+
+        return result
+
+    def _save(self):
+
+        self.state_store.save(self.state)
+
+    def _normalise_status(self, order):
+
+        return str(
+            order.get("orderStatus")
+            or order.get("status")
+            or ""
+        ).upper().strip()
+
+    def _find_order(self, correlation_id):
+
+        orders = self.state["orders"]
+
+        for group_name in (
+            "pending_entry_orders",
+            "stop_loss_orders",
+        ):
+
+            group = orders.get(group_name, {})
+
+            if not isinstance(group, dict):
+                raise RuntimeError(
+                    "Invalid order group: " + group_name
+                )
+
+            for key, record in group.items():
+
+                if not isinstance(record, dict):
+                    continue
+
+                saved_correlation = (
+                    record.get("correlationId")
+                    or record.get("correlation_id")
+                    or record.get("payload", {}).get("correlationId")
+                )
+
+                if str(saved_correlation) == str(correlation_id):
+
+                    return group_name, key, record
+
+        return None, None, None
+
+    # ======================================================
+    # BROKER ORDER VALIDATION
+    # ======================================================
+
+    def _validate_broker_order(
+        self,
+        broker_order,
+        saved_record,
+    ):
+
+        if not isinstance(broker_order, dict):
+            raise RuntimeError(
+                "Broker order must be a dictionary."
+            )
+
+        correlation_id = (
+            broker_order.get("correlationId")
+            or broker_order.get("correlation_id")
+        )
+
+        saved_correlation = (
+            saved_record.get("correlationId")
+            or saved_record.get("correlation_id")
+            or saved_record.get("payload", {}).get("correlationId")
+        )
+
+        if not correlation_id:
+            raise RuntimeError(
+                "Broker order correlation ID is missing."
+            )
+
+        if str(correlation_id) != str(saved_correlation):
+            raise RuntimeError(
+                "Broker correlation ID mismatch."
+            )
+
+        broker_order_id = (
+            broker_order.get("orderId")
+            or broker_order.get("order_id")
+        )
+
+        saved_order_id = saved_record.get("order_id")
+
+        if saved_order_id and broker_order_id:
+
+            if str(saved_order_id) != str(broker_order_id):
+                raise RuntimeError(
+                    "Broker order ID mismatch."
+                )
+
+        active = self.state.get(
+            "active_contract",
+            {},
+        )
+
+        broker_security = (
+            broker_order.get("securityId")
+            or broker_order.get("security_id")
+        )
+
+        broker_segment = (
+            broker_order.get("exchangeSegment")
+            or broker_order.get("exchange_segment")
+        )
+
+        if str(broker_security) != str(active.get("security_id")):
+            raise RuntimeError(
+                "Fill contract security ID mismatch."
+            )
+
+        if str(broker_segment) != str(active.get("exchange_segment")):
+            raise RuntimeError(
+                "Fill contract exchange segment mismatch."
+            )
+
+        saved_payload = saved_record.get("payload", {})
+
+        expected_quantity = (
+            saved_record.get("quantity")
+            or saved_payload.get("quantity")
+        )
+
+        broker_quantity = (
+            broker_order.get("quantity")
+            or broker_order.get("orderQuantity")
+        )
+
+        if expected_quantity is not None and broker_quantity is not None:
+
+            if int(expected_quantity) != int(broker_quantity):
+                raise RuntimeError(
+                    "Broker order quantity mismatch."
+                )
+
+        expected_product = (
+            saved_record.get("product_type")
+            or saved_payload.get("productType")
+        )
+
+        broker_product = (
+            broker_order.get("productType")
+            or broker_order.get("product_type")
+        )
+
+        if expected_product and broker_product:
+
+            if str(expected_product).upper() != str(broker_product).upper():
+                raise RuntimeError(
+                    "Broker product type mismatch."
+                )
+
+        expected_transaction = (
+            saved_payload.get("transactionType")
+            or saved_record.get("transaction_type")
+        )
+
+        broker_transaction = (
+            broker_order.get("transactionType")
+            or broker_order.get("transaction_type")
+        )
+
+        if expected_transaction and broker_transaction:
+
+            if str(expected_transaction).upper() != str(broker_transaction).upper():
+                raise RuntimeError(
+                    "Broker transaction type mismatch."
+                )
+
+        return True
+
+    # ======================================================
+    # FILL VALUES
+    # ======================================================
+
+    def _fill_values(self, broker_order):
+
+        filled_value = (
+            broker_order.get("filledQty")
+            if broker_order.get("filledQty") is not None
+            else broker_order.get("filledQuantity")
+        )
+
+        if filled_value is None:
+            filled_value = broker_order.get("tradedQuantity", 0)
+
+        filled_quantity = self._integer(
+            filled_value,
+            "filled quantity",
+        )
+
+        average_value = (
+            broker_order.get("averageTradedPrice")
+            or broker_order.get("avgTradedPrice")
+            or broker_order.get("average_price")
+            or 0
+        )
+
+        if filled_quantity == 0:
+            average_price = 0.0
+        else:
+            average_price = self._price(
+                average_value,
+                "average traded price",
+            )
+
+        return filled_quantity, average_price
+
+    # ======================================================
+    # PRODUCT TYPE
+    # ======================================================
+
+    def _product_type(self, saved_record):
+
+        value = (
+            saved_record.get("product_type")
+            or saved_record.get("payload", {}).get("productType")
+        )
+
+        value = str(value or "").upper()
+
+        if value not in ("MARGIN", "INTRADAY"):
+            raise RuntimeError(
+                "Invalid saved order product type."
+            )
+
+        return value
+
+    # ======================================================
+    # POSITION TOTALS
+    # ======================================================
+
+    def _recalculate_positions(self):
+
+        positions = self.state["positions"]
+
+        registered = positions.get(
+            "registered_positions",
+            {},
+        )
+
+        total = 0
+        margin = 0
+        intraday = 0
+
+        for record in registered.values():
+
+            filled = self._integer(
+                record.get("filled_qty"),
+                "position filled quantity",
+            )
+
+            closed = self._integer(
+                record.get("closed_qty", 0),
+                "position closed quantity",
+            )
+
+            if closed > filled:
+                raise RuntimeError(
+                    "Position closed quantity exceeds filled quantity."
+                )
+
+            open_quantity = filled - closed
+
+            product = str(
+                record.get("product_type", "")
+            ).upper()
+
+            if product not in ("MARGIN", "INTRADAY"):
+                raise RuntimeError(
+                    "Invalid registered position product type."
+                )
+
+            total += open_quantity
+
+            if product == "MARGIN":
+                margin += open_quantity
+            else:
+                intraday += open_quantity
+
+        positions["total_quantity"] = total
+        positions["margin_quantity"] = margin
+        positions["intraday_quantity"] = intraday
+
+        # A fill changes open exposure. Do not claim that the new
+        # quantity is protected until the broker SL order book has been
+        # independently reconciled by StopLossController.
+        positions["common_stop_loss_quantity"] = 0
+
+        positions["updated_at"] = self._now()
+
+        return total
+
+    # ======================================================
+    # COMMON SL - TIGHTEN ONLY
+    # ======================================================
+
+    def _tighten_common_sl(self, incremental_average):
+
+        strategy = self.state["strategy"]
+        prices = self.state["prices"]
+
+        direction = str(
+            strategy.get("direction", "")
+        ).upper()
+
+        distance = self._integer(
+            strategy.get("stop_loss_points"),
+            "stop loss points",
+        )
+
+        current_sl = prices.get("common_stop_loss")
+
+        if direction == "SELL":
+
+            candidate = incremental_average + distance
+
+            if current_sl is None:
+                prices["common_stop_loss"] = candidate
+
+            else:
+
+                current_sl = float(current_sl)
+
+                # SELL SL can only move downward.
+                prices["common_stop_loss"] = min(
+                    current_sl,
+                    candidate,
+                )
+
+        elif direction == "BUY":
+
+            candidate = incremental_average - distance
+
+            if candidate <= 0:
+                raise RuntimeError(
+                    "Calculated BUY stop loss is invalid."
+                )
+
+            if current_sl is None:
+                prices["common_stop_loss"] = candidate
+
+            else:
+
+                current_sl = float(current_sl)
+
+                # BUY SL can only move upward.
+                prices["common_stop_loss"] = max(
+                    current_sl,
+                    candidate,
+                )
+
+        else:
+
+            raise RuntimeError(
+                "Invalid strategy direction."
+            )
+
+    # ======================================================
+    # INCREMENTAL AVERAGE
+    # ======================================================
+
+    def _incremental_average(
+        self,
+        old_quantity,
+        old_average,
+        new_quantity,
+        new_average,
+    ):
+
+        delta = new_quantity - old_quantity
+
+        if delta <= 0:
+            raise RuntimeError(
+                "Incremental fill quantity must be positive."
+            )
+
+        if new_quantity <= 0:
+            raise RuntimeError(
+                "Cumulative fill quantity is invalid."
+            )
+
+        old_value = old_quantity * old_average
+        new_value = new_quantity * new_average
+
+        incremental_value = new_value - old_value
+
+        incremental_average = incremental_value / delta
+
+        if incremental_average <= 0:
+            raise RuntimeError(
+                "Incremental average price is invalid."
+            )
+
+        return delta, incremental_average
+
+    # ======================================================
+    # ENTRY FILL
+    # ======================================================
+
+    def _apply_entry_fill(
+        self,
+        correlation_id,
+        saved_record,
+        cumulative_quantity,
+        cumulative_average,
+    ):
+
+        strategy_state = self.state.get("strategy", {})
+        if (
+            strategy_state.get("cycle_active") is not True
+            or strategy_state.get("cycle_closed") is not False
+        ):
+            raise RuntimeError(
+                "Entry fill observed outside an active cycle. "
+                "The broker order must be reconciled manually; it will not be enrolled."
+            )
+
+        orders = self.state["orders"]
+
+        fill_totals = orders["order_fill_totals"]
+
+        previous = fill_totals.get(
+            str(correlation_id),
+            {},
+        )
+
+        if not isinstance(previous, dict):
+            raise RuntimeError(
+                "Saved fill total is invalid."
+            )
+
+        old_quantity = self._integer(
+            previous.get("filled_qty", 0),
+            "previous entry filled quantity",
+        )
+
+        old_average = float(
+            previous.get("average_price", 0) or 0
+        )
+
+        if cumulative_quantity < old_quantity:
+            raise RuntimeError(
+                "Broker cumulative entry fill quantity moved backwards."
+            )
+
+        if cumulative_quantity == old_quantity:
+            return False
+
+        delta, incremental_average = self._incremental_average(
+            old_quantity,
+            old_average,
+            cumulative_quantity,
+            cumulative_average,
+        )
+
+        product_type = self._product_type(saved_record)
+
+        registered = self.state["positions"][
+            "registered_positions"
+        ]
+
+        position_id = str(correlation_id)
+
+        position = registered.get(position_id)
+
+        if position is None:
+
+            position = {
+                "entry_correlation_id": str(correlation_id),
+                "filled_qty": 0,
+                "closed_qty": 0,
+                "product_type": product_type,
+                "average_price": 0.0,
+                "last_fill_price": 0.0,
+                "created_at": self._now(),
+                "updated_at": self._now(),
+            }
+
+            registered[position_id] = position
+
+        if position.get("product_type") != product_type:
+            raise RuntimeError(
+                "Position product type changed unexpectedly."
+            )
+
+        old_position_filled = self._integer(
+            position.get("filled_qty", 0),
+            "position filled quantity",
+        )
+
+        new_position_filled = old_position_filled + delta
+
+        old_position_average = float(
+            position.get("average_price", 0) or 0
+        )
+
+        if old_position_filled == 0:
+
+            new_position_average = incremental_average
+
+        else:
+
+            new_position_average = (
+                (
+                    old_position_filled * old_position_average
+                    + delta * incremental_average
+                )
+                / new_position_filled
+            )
+
+        position["filled_qty"] = new_position_filled
+        position["average_price"] = new_position_average
+        position["last_fill_price"] = incremental_average
+        position["updated_at"] = self._now()
+
+        self._recalculate_positions()
+
+        prices = self.state["prices"]
+
+        prices["last_entry"] = new_position_average
+
+        if prices.get("initial_entry") is None:
+            prices["initial_entry"] = incremental_average
+
+        # Base the common SL on the weighted average of this registered
+        # entry position, not merely the latest partial-fill slice.
+        self._tighten_common_sl(
+            new_position_average
+        )
+
+        # Count an entry sequence once, on its first actual fill. The next
+        # grid price is deliberately NOT armed until the broker confirms
+        # this LIMIT order is fully TRADED.
+        sequence = self._integer(
+            saved_record.get("sequence"),
+            "entry sequence",
+        )
+        strategy = self.state["strategy"]
+        strategy["entry_count"] = max(
+            int(strategy.get("entry_count", 0) or 0),
+            sequence,
+        )
+        strategy["last_entry_sequence"] = sequence
+        strategy["last_entry_order_correlation_id"] = str(correlation_id)
+
+        fill_totals[str(correlation_id)] = {
+            "filled_qty": cumulative_quantity,
+            "average_price": cumulative_average,
+            "updated_at": self._now(),
+        }
+
+        saved_record["filled_qty"] = cumulative_quantity
+        saved_record["average_price"] = cumulative_average
+        saved_record["last_fill_update"] = self._now()
+
+        return True
+
+    # ======================================================
+    # EXIT FILL - FIFO
+    # ======================================================
+
+    def _apply_exit_fill(
+        self,
+        correlation_id,
+        saved_record,
+        cumulative_quantity,
+        cumulative_average,
+    ):
+
+        orders = self.state["orders"]
+
+        fill_totals = orders["order_fill_totals"]
+
+        previous = fill_totals.get(
+            str(correlation_id),
+            {},
+        )
+
+        old_quantity = self._integer(
+            previous.get("filled_qty", 0),
+            "previous exit filled quantity",
+        )
+
+        old_average = float(
+            previous.get("average_price", 0) or 0
+        )
+
+        if cumulative_quantity < old_quantity:
+            raise RuntimeError(
+                "Broker cumulative exit fill quantity moved backwards."
+            )
+
+        if cumulative_quantity == old_quantity:
+            return False
+
+        delta, incremental_average = self._incremental_average(
+            old_quantity,
+            old_average,
+            cumulative_quantity,
+            cumulative_average,
+        )
+
+        registered = self.state["positions"][
+            "registered_positions"
+        ]
+
+        exit_product_type = self._product_type(saved_record)
+
+        # An SL order is tied to one Dhan product bucket. Never allocate
+        # its fills against positions held under the other product type.
+        # A broker overfill or inconsistent cumulative update must fail
+        # atomically rather than partially closing the local ledger.
+        total_open_quantity = 0
+        for position_id, position in registered.items():
+            if not isinstance(position, dict):
+                raise RuntimeError(
+                    "Invalid registered position: " + str(position_id)
+                )
+            filled = self._integer(
+                position.get("filled_qty"),
+                "position filled quantity",
+            )
+            closed = self._integer(
+                position.get("closed_qty", 0),
+                "position closed quantity",
+            )
+            if closed > filled:
+                raise RuntimeError(
+                    "Position closed quantity exceeds filled quantity."
+                )
+            position_product = str(
+                position.get("product_type", "")
+            ).upper()
+            if position_product not in ("MARGIN", "INTRADAY"):
+                raise RuntimeError(
+                    "Registered position has an invalid product type."
+                )
+            if position_product == exit_product_type:
+                total_open_quantity += filled - closed
+
+        if delta > total_open_quantity:
+            raise RuntimeError(
+                "Exit fill exceeds registered open quantity for "
+                + exit_product_type
+                + ". No local positions were changed."
+            )
+
+        remaining_exit_quantity = delta
+
+        for position_id in list(registered.keys()):
+
+            position = registered[position_id]
+
+            filled = self._integer(
+                position.get("filled_qty"),
+                "position filled quantity",
+            )
+
+            closed = self._integer(
+                position.get("closed_qty", 0),
+                "position closed quantity",
+            )
+
+            open_quantity = filled - closed
+
+            position_product = str(
+                position.get("product_type", "")
+            ).upper()
+
+            if position_product != exit_product_type:
+                continue
+
+            if open_quantity <= 0:
+                continue
+
+            allocation = min(
+                open_quantity,
+                remaining_exit_quantity,
+            )
+
+            position["closed_qty"] = closed + allocation
+            position["last_exit_price"] = incremental_average
+            position["updated_at"] = self._now()
+
+            remaining_exit_quantity -= allocation
+
+            if remaining_exit_quantity == 0:
+                break
+
+        if remaining_exit_quantity > 0:
+            raise RuntimeError(
+                "Exit fill exceeds registered open position quantity."
+            )
+
+        self._recalculate_positions()
+
+        fill_totals[str(correlation_id)] = {
+            "filled_qty": cumulative_quantity,
+            "average_price": cumulative_average,
+            "updated_at": self._now(),
+        }
+
+        if self.state["positions"]["total_quantity"] == 0:
+
+            strategy = self.state["strategy"]
+
+            strategy["cycle_active"] = False
+            strategy["cycle_closed"] = True
+            strategy["closed_at"] = self._now()
+
+        return True
+
+    # ======================================================
+    # PUBLIC OBSERVE METHOD
+    # ======================================================
+
+    def observe_order(self, broker_order):
+
+        if not isinstance(broker_order, dict):
+            raise RuntimeError(
+                "Invalid broker order response."
+            )
+
+        correlation_id = (
+            broker_order.get("correlationId")
+            or broker_order.get("correlation_id")
+        )
+
+        if not correlation_id:
+            raise RuntimeError(
+                "Broker order correlation ID missing."
+            )
+
+        group_name, order_key, saved_record = self._find_order(
+            correlation_id
+        )
+
+        if saved_record is None:
+            raise RuntimeError(
+                "Broker order is not registered in algo state."
+            )
+
+        self._validate_broker_order(
+            broker_order,
+            saved_record,
+        )
+
+        cumulative_quantity, cumulative_average = (
+            self._fill_values(broker_order)
+        )
+
+        expected_quantity = self._integer(
+            saved_record.get(
+                "quantity",
+                saved_record.get(
+                    "payload",
+                    {},
+                ).get("quantity"),
+            ),
+            "saved order quantity",
+        )
+
+        if cumulative_quantity > expected_quantity:
+            raise RuntimeError(
+                "Broker filled quantity exceeds order quantity."
+            )
+
+        status = self._normalise_status(
+            broker_order
+        )
+
+        if status not in (
+            self.ACTIVE_ENTRY_STATUSES
+            | self.TERMINAL_STATUSES
+        ):
+            raise RuntimeError(
+                "Unknown broker order status: " + status
+            )
+
+        if status == "TRADED" and cumulative_quantity != expected_quantity:
+            raise RuntimeError(
+                "Broker reports TRADED but cumulative fill quantity does not equal order quantity."
+            )
+
+        changed = False
+
+        if group_name == "pending_entry_orders":
+
+            changed = self._apply_entry_fill(
+                correlation_id,
+                saved_record,
+                cumulative_quantity,
+                cumulative_average,
+            )
+
+        elif group_name == "stop_loss_orders":
+
+            changed = self._apply_exit_fill(
+                correlation_id,
+                saved_record,
+                cumulative_quantity,
+                cumulative_average,
+            )
+
+        else:
+
+            raise RuntimeError(
+                "Unsupported order group."
+            )
+
+        saved_record["status"] = status
+        saved_record["broker_status"] = status
+        saved_record["last_observed_at"] = self._now()
+
+        if group_name == "pending_entry_orders" and status == "TRADED":
+            # Arm the next resting LIMIT level only after the current entry
+            # is completely filled. This prevents overlapping entry orders
+            # while a partial fill is still working.
+            strategy = self.state["strategy"]
+            sequence = self._integer(
+                saved_record.get("sequence"),
+                "entry sequence",
+            )
+            maximum_entries = self._integer(
+                strategy.get("maximum_entries"),
+                "maximum entries",
+            )
+            grid_points = self._integer(
+                strategy.get("grid_points"),
+                "grid points",
+            )
+            if sequence >= maximum_entries:
+                self.state["prices"]["next_grid"] = None
+                strategy["next_entry_sequence"] = None
+            else:
+                final_entry_average = self._price(
+                    cumulative_average,
+                    "final entry average price",
+                )
+                direction = str(strategy.get("direction", "")).upper()
+                if direction == "SELL":
+                    next_grid = final_entry_average - grid_points
+                elif direction == "BUY":
+                    next_grid = final_entry_average + grid_points
+                else:
+                    raise RuntimeError("Invalid strategy direction for next grid.")
+                if next_grid <= 0:
+                    raise RuntimeError("Calculated next grid price is invalid.")
+                self.state["prices"]["next_grid"] = float(next_grid)
+                strategy["next_entry_sequence"] = sequence + 1
+            saved_record["entry_complete"] = True
+
+        broker_order_id = (
+            broker_order.get("orderId")
+            or broker_order.get("order_id")
+        )
+
+        if broker_order_id:
+            saved_record["order_id"] = str(broker_order_id)
+
+        if changed or status != saved_record.get("previous_status"):
+
+            saved_record["previous_status"] = status
+            self._save()
+
+        return {
+            "updated": bool(changed),
+            "correlation_id": str(correlation_id),
+            "status": status,
+            "cumulative_filled_qty": cumulative_quantity,
+            "registered_open_qty": self.state[
+                "positions"
+            ].get("total_quantity", 0),
+        }
